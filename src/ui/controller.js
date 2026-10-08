@@ -14,27 +14,27 @@ import {
     chatBinding, setChatBinding, characterBinding, setCharacterBinding,
     exportGraph, importGraph, blankGraph, isFolderCollapsed, setFolderCollapsed, togetherGroup,
     newDeciderKey, removeDeciderKey, onGraphTouched, duplicateNode, newStateValue, groupNodes, ungroup, groupMembers, createBlanket, inOffGroup,
-} from '../state.js?v=0.17.0';
-import { applyTheme } from '../theme.js?v=0.17.0';
-import { makeClip, pasteClip, readClip, toClipboard, fromClipboard, lastClip, describeClip } from '../clip.js?v=0.17.0';
-import { renderThemeEditor } from '../theme-editor.js?v=0.17.0';
-import * as H from '../history.js?v=0.17.0';
-import * as L from '../library.js?v=0.17.0';
-import { compile, gatherContext, resolveNode, textOf, generateLevels, emissionCounts, wirePreview, countTokens, countTextTokens, routingMode, explainDecider, deciderInputList, collect } from '../compile.js?v=0.17.0';
-import { LORE_POSITIONS } from '../lore.js?v=0.17.0';
-import { computeState, stageFor, NUDGE_KEY } from '../statevals.js?v=0.17.0';
-import { openStateWindow, closeStateWindow } from '../state-window.js?v=0.17.0';
-import { memoryAt, memoryHistory, setMemoryNow, mirrorToLorebook, lorebookNames, DECIDER_SAVES } from '../memory.js?v=0.17.0';
-import { check as checkFormula } from '../expr.js?v=0.17.0';
-import { DEFAULT_SELECT, isActive as selectActive, selectLabel } from '../select.js?v=0.17.0';
-import { run, profileName, effectiveModel, callCount, testBlock, shapeForApi, inspectProfile, modelsForSource, sourceForBlock, cachedModels, fetchModelList, previewBlock } from '../run.js?v=0.17.0';
-import { Canvas, WIRE_LABEL, TYPE_LABEL, TYPE_ICON } from '../canvas.js?v=0.17.0';
-import { modelCombo } from '../model-combo.js?v=0.17.0';
-import { jevReady } from '../jev.js?v=0.17.0';
-import { createGraphAnalysis } from './graph-analysis.js?v=0.17.0';
+} from '../state.js?v=0.18.0';
+import { applyTheme } from '../theme.js?v=0.18.0';
+import { makeClip, pasteClip, readClip, toClipboard, fromClipboard, lastClip, describeClip } from '../clip.js?v=0.18.0';
+import { renderThemeEditor } from '../theme-editor.js?v=0.18.0';
+import * as H from '../history.js?v=0.18.0';
+import * as L from '../library.js?v=0.18.0';
+import { compile, gatherContext, resolveNode, textOf, generateLevels, emissionCounts, wirePreview, countTokens, countTextTokens, routingMode, explainDecider, deciderInputList, collect } from '../compile.js?v=0.18.0';
+import { LORE_POSITIONS } from '../lore.js?v=0.18.0';
+import { computeState, stageFor, NUDGE_KEY } from '../statevals.js?v=0.18.0';
+import { openStateWindow, closeStateWindow } from '../state-window.js?v=0.18.0';
+import { memoryAt, memoryHistory, setMemoryNow, mirrorToLorebook, lorebookNames, DECIDER_SAVES } from '../memory.js?v=0.18.0';
+import { check as checkFormula } from '../expr.js?v=0.18.0';
+import { DEFAULT_SELECT, isActive as selectActive, selectLabel } from '../select.js?v=0.18.0';
+import { run, profileName, effectiveModel, callCount, testBlock, shapeForApi, inspectProfile, modelsForSource, sourceForBlock, cachedModels, fetchModelList, previewBlock } from '../run.js?v=0.18.0';
+import { Canvas, WIRE_LABEL, TYPE_LABEL, TYPE_ICON } from '../canvas.js?v=0.18.0';
+import { modelCombo } from '../model-combo.js?v=0.18.0';
+import { jevReady } from '../jev.js?v=0.18.0';
+import { createGraphAnalysis } from './graph-analysis.js?v=0.18.0';
 
-import { createWorkbench } from './workbench.js?v=0.17.0';
-import { createDomainSurfaces } from './domain-surfaces.js?v=0.17.0';
+import { createWorkbench } from './workbench.js?v=0.18.0';
+import { createDomainSurfaces } from './domain-surfaces.js?v=0.18.0';
 
 let workbench = null;
 let root = null;

@@ -1,9 +1,11 @@
 {
   "name": "silly-canvas",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "test": "node tools/test-all.mjs",
     "test:browser": "playwright test",
@@ -12,7 +14,9 @@
     "check:types": "svelte-check --tsconfig ./tsconfig.json",
     "check:assets": "node tools/check-assets.mjs",
     "check": "npm run test && npm run check:types && npm run build && npm run check:assets && npm run test:browser",
-    "benchmark": "node tools/benchmark-canvas.mjs"
+    "benchmark": "node tools/benchmark-canvas.mjs",
+    "capture": "node tools/capture-workbench.mjs",
+    "smoke:install": "node tools/smoke-install.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",

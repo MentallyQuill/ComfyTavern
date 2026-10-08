@@ -10,4 +10,5 @@ test('the real workbench opens with an Output card and no browser errors', async
     expect(bounds.width).toBeGreaterThan(400);
     expect(bounds.height).toBeGreaterThan(400);
     expect(errors).toEqual([]);
+    expect(await page.evaluate(() => window.sillyCanvas.open === window.canvasHarness.UI.open && !!document.getElementById('pc-sendbar') && !!document.getElementById('pc-menu-launch'))).toBe(true);
 });

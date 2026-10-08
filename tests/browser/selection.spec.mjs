@@ -1,4 +1,15 @@
 import { test, expect } from '@playwright/test';
+test('Shift-drag preserves and moves the selected set with real mouse input', async ({ page }) => {
+    const ids = await setup(page);
+    const before = await page.evaluate(ids => {
+        const { canvas, graph } = window.canvasHarness; canvas.setMulti(ids.slice(0, 2)); return ids.slice(0, 2).map(id => [graph.nodes[id].x, graph.nodes[id].y]);
+    }, ids);
+    const card = await page.locator(`.pc-node[data-id="${ids[0]}"]`).boundingBox();
+    await page.keyboard.down('Shift'); await page.mouse.move(card.x + 100, card.y + 30); await page.mouse.down();
+    await page.mouse.move(card.x + 140, card.y + 65, { steps: 4 }); await page.mouse.up(); await page.keyboard.up('Shift');
+    const after = await page.evaluate(ids => ({ positions: ids.slice(0, 2).map(id => [window.canvasHarness.graph.nodes[id].x, window.canvasHarness.graph.nodes[id].y]), count: window.canvasHarness.canvas.multi.size }), ids);
+    expect(after).toEqual({ positions: before.map(([x, y]) => [x + 40, y + 35]), count: 2 });
+});
 async function setup(page) {
     await page.goto('/tests/browser/harness.html');
     await page.waitForFunction(() => !!window.canvasHarness);

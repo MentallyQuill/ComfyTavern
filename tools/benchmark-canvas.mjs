@@ -4,7 +4,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, sep, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
-const html = `<!doctype html><html><head><link rel="stylesheet" href="/style.css"><style>html,body{margin:0;font:16px Arial;background:#15151b}.pc-canvas-host{width:100%;height:100%}</style></head><body><div class="pc-root pc-open"><div id="host" class="pc-canvas-host"></div></div><script type="module">
+const html = `<!doctype html><html><head><link rel="stylesheet" href="/style.css"><style>html,body{margin:0;font:16px Arial;background:#15151b}.pc-canvas-host{width:100%;height:100%}.pc-header,.pc-status,.pc-sidebar,.pc-inspector{display:none}</style></head><body><script type="module">
 import { installMock } from '/tests/mock.js'; installMock({settings:{ui:{liveTokens:false}}});
 const version=(await (await fetch('/manifest.json')).json()).version;
 const {Canvas}=await import('/src/canvas.js?v='+version);
@@ -12,9 +12,11 @@ const theme=await import('/src/theme.js?v='+version);
 const compiler=await import('/src/compile.js?v='+version);
 const state=await import('/src/state.js?v='+version);
 const {createGraphAnalysis}=await import('/src/ui/graph-analysis.js?v='+version);
+const {mountWorkbench}=await import('/dist/silly-canvas-ui.js?v='+version);
 let countsRuns=0,levelRuns=0, projection;
 const analysis=createGraphAnalysis({counts:g=>{countsRuns++;return compiler.emissionCounts(g)},levels:g=>{levelRuns++;return compiler.generateLevels(g)},group:state.togetherGroup});
-const canvas=new Canvas(document.getElementById('host'),{prepareRender:()=>{projection=analysis.prepare(canvas.graph)},copiesOf:n=>projection.counts.get(n.id)??1,waveInfo:n=>projection.waveById.get(n.id)});
+const workbench=mountWorkbench(document.body,{});workbench.root.classList.add('pc-open');
+const canvas=new Canvas(workbench.parts.canvasHost,{onView:camera=>workbench.update({camera}),onSelect:()=>workbench.update({selectionCount:canvas.multi.size||(canvas.selection?.kind==='node'?1:0)}),onMulti:ids=>workbench.update({selectionCount:ids.length}),prepareRender:()=>{projection=analysis.prepare(canvas.graph)},copiesOf:n=>projection.counts.get(n.id)??1,waveInfo:n=>projection.waveById.get(n.id)});
 window.bench={canvas,theme,calls:()=>({countsRuns,levelRuns})};
 </script></body></html>`;
 const server = createServer(async (request, response) => {
@@ -79,7 +81,7 @@ try {
         rows.push(row); console.log(JSON.stringify(row));
     }
     const output = new URL('../benchmark-results/', import.meta.url); await mkdir(output, { recursive: true });
-    await writeFile(new URL('latest.json', output), JSON.stringify({ browser: await browser.version(), viewport: { width: 1440, height: 900 }, scope: 'Real renderer and shared analysis hooks; synthetic chain plus skip-three edges; cursor-anchored 1.1x wheel steps; 30 animation frames per sample.', errors, rows }, null, 2));
+    await writeFile(new URL('latest.json', output), JSON.stringify({ browser: await browser.version(), viewport: { width: 1440, height: 900 }, scope: 'Real Svelte canvas, mounted workbench and camera/selection controls; auxiliary panes hidden for the matched full canvas viewport; shared native analysis hooks; synthetic chain plus skip-three edges; cursor-anchored 1.1x wheel steps; 30 animation frames per sample.', errors, rows }, null, 2));
     if (errors.length) throw new Error(errors.join('\n'));
     console.log(`Saved ${rows.length} samples to benchmark-results/latest.json`);
 } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }

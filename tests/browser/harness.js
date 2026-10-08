@@ -1,5 +1,7 @@
 import { installMock } from '../mock.js';
 const context = installMock({ settings: { graphs: {}, ui: { liveTokens: false } } });
+context.eventTypes = new Proxy({}, { get: (_, key) => key });
+context.SlashCommandParser = { addCommandObject() {} }; context.SlashCommand = { fromProps: value => value };
 globalThis.toastr = { info() {}, success() {}, warning() {}, error() {} };
 const version = (await (await fetch('/manifest.json')).json()).version;
 const S = await import(`/src/state.js?v=${version}`);
@@ -9,7 +11,8 @@ const setGraph = Canvas.prototype.setGraph;
 Canvas.prototype.setGraph = function (graph) { canvas = this; return setGraph.call(this, graph); };
 const UI = await import(`/src/ui.js?v=${version}`);
 const H = await import(`/src/history.js?v=${version}`);
-UI.open();
+await import(`/index.js?v=${version}`);
+window.sillyCanvas.open();
 const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 await settle();
 window.canvasHarness = {

@@ -14,14 +14,14 @@
 import {
     NODE_TYPES, WIRE_KINDS, connect, disconnect, removeNode, touchGraph, wiresInto, deciderKeys, outPorts, hasPorts,
     groupMembers, ungroup, deleteGroup, groupOf, inOffGroup, settleOnBlankets, gatherBlanket, setGroupEnabled, blanketAt, GROUP_MIN,
-} from './state.js?v=0.17.0';
-import { selectLabel } from './select.js?v=0.17.0';
-import { graphPoint, zoomAt, wheelFactor } from './canvas/camera.js?v=0.17.0';
-import { createFrameScheduler } from './canvas/frame.js?v=0.17.0';
-import { selectionMode, rectangle, intersects, combineSelection } from './canvas/selection.js?v=0.17.0';
-import { createGeometryCache, indexIncidentWires } from './canvas/geometry.js?v=0.17.0';
-import { nodeCard } from './canvas/presentation.js?v=0.17.0';
-import { mountCanvas } from '../dist/silly-canvas-ui.js?v=0.17.0';
+} from './state.js?v=0.18.0';
+import { selectLabel } from './select.js?v=0.18.0';
+import { graphPoint, zoomAt, wheelFactor } from './canvas/camera.js?v=0.18.0';
+import { createFrameScheduler } from './canvas/frame.js?v=0.18.0';
+import { selectionMode, rectangle, intersects, combineSelection } from './canvas/selection.js?v=0.18.0';
+import { createGeometryCache, indexIncidentWires } from './canvas/geometry.js?v=0.18.0';
+import { nodeCard } from './canvas/presentation.js?v=0.18.0';
+import { mountCanvas } from '../dist/silly-canvas-ui.js?v=0.18.0';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -1040,9 +1040,10 @@ export class Canvas {
                     const ids = this.#pickedIds();
                     const remove = e.altKey || ((e.ctrlKey || e.metaKey) && !e.shiftKey && members.every(id => ids.has(id)));
                     for (const id of members) remove ? ids.delete(id) : ids.add(id);
-                    this.setMulti([...ids]); return;
+                    this.setMulti([...ids]);
+                    if (!e.shiftKey || e.altKey) return;
                 }
-                if (g.collapsed && this.multi.size > members.length && members.every(id => this.multi.has(id))) {
+                if (g.collapsed && (this.multi.size > members.length || e.shiftKey) && members.every(id => this.multi.has(id))) {
                     const start = this.toGraph(e.clientX, e.clientY);
                     this.drag = { several: [...this.multi].map(id => [id, this.graph.nodes[id].x, this.graph.nodes[id].y]), groups: this.#selectedGroupStarts(), sx: start.x, sy: start.y, moved: false };
                     return;
@@ -1093,15 +1094,15 @@ export class Canvas {
                     if (e.altKey || ((e.ctrlKey || e.metaKey) && !e.shiftKey && ids.has(id))) ids.delete(id);
                     else ids.add(id);
                     this.setMulti([...ids]);
-                    return;
+                    if (!e.shiftKey || e.altKey) return;
                 }
                 if (this.multi.size > 1 && this.multi.has(id)) {
                     // Drag them all together.
                     const start = this.toGraph(e.clientX, e.clientY);
-                    this.drag = { several: [...this.multi].map(m => [m, this.graph.nodes[m]?.x ?? 0, this.graph.nodes[m]?.y ?? 0]), groups: this.#selectedGroupStarts(), clicked: id, sx: start.x, sy: start.y, moved: false };
+                    this.drag = { several: [...this.multi].map(m => [m, this.graph.nodes[m]?.x ?? 0, this.graph.nodes[m]?.y ?? 0]), groups: this.#selectedGroupStarts(), clicked: e.shiftKey ? null : id, sx: start.x, sy: start.y, moved: false };
                     return;
                 }
-                if (this.multi.size) this.setMulti([]);
+                if (this.multi.size && !e.shiftKey) this.setMulti([]);
                 this.select({ kind: 'node', id });
                 if (e.target.closest('.pc-toggle')) return;
                 const start = this.toGraph(e.clientX, e.clientY);
