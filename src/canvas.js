@@ -137,11 +137,13 @@ export class Canvas {
         this.tokens = null;         // live token counts, keyed by node id
         this.tokensKey = '';
         this.mode = 'select';
+        this.operationEpoch = 0;
         this.spaceDown = false;
         this.geometry = createGeometryCache();
         this.nodeElements = new Map();
         this.incident = new Map();
         this.wireViews = new Map();
+        this.eventController = new window.AbortController();
 
         host.classList.add('pc-canvas');
         host.tabIndex = 0;
@@ -175,6 +177,14 @@ export class Canvas {
         this.#bind();
     }
 
+    async destroy() {
+        this.cancelGesture();
+        this.frames.destroy();
+        this.resizeObserver?.disconnect();
+        this.eventController.abort();
+        await this.layer.destroy();
+    }
+
     /* -------------------------------------------------------------- */
     /* view                                                            */
     /* -------------------------------------------------------------- */
@@ -187,7 +197,7 @@ export class Canvas {
     setGraph(graph) {
         if (!graph) return;
         this.cancelGesture();
-        if (graph !== this.graph) { this.tokens = null; this.tokensKey = ''; this.geometry.clear(); }
+        if (graph !== this.graph) { this.trace = null; this.tokens = null; this.tokensKey = ''; this.geometry.clear(); }
         this.graph = graph;
         this.selection = null;
         this.multi.clear();
@@ -235,6 +245,7 @@ export class Canvas {
             this.host.style.backgroundSize = `${s}px ${s}px`;
             this.host.style.backgroundPosition = at;
         }
+        this.hooks.onView?.({ ...v, mode: this.mode });
     }
 
     /** Screen coordinates to graph coordinates. */
@@ -549,6 +560,7 @@ export class Canvas {
 
     /** Restore a gesture without persisting a half-completed graph edit. */
     cancelGesture() {
+        this.operationEpoch++;
         const active = !!(this.drag || this.marquee || this.pan || this.linking);
         this.frames.cancel(); clearTimeout(this.wheelTimer);
         this.gestureRect = null; this.wheelRect = null;
@@ -936,26 +948,31 @@ export class Canvas {
 
     #bind() {
         const host = this.host;
+        const on = (target, type, handler, options = {}) => target.addEventListener(type, handler, { ...options, signal: this.eventController.signal });
         const typing = (e) => e.target?.closest?.('input, textarea, select, [contenteditable="true"]') || document.activeElement?.matches?.('input, textarea, select, [contenteditable="true"]');
-        document.addEventListener('keydown', (e) => {
+        on(document, 'keydown', (e) => {
             const root = host.closest('.pc-root');
             if (root && !root.classList.contains('pc-open')) return;
-            if ((e.code === 'Space' || e.key === ' ') && !typing(e)) {
+            if ((e.code === 'Space' || e.key === ' ') && !typing(e) && !e.target?.closest?.('button, a, summary')) {
                 e.preventDefault(); this.spaceDown = true; host.classList.add('pc-space-pan');
             }
         });
-        document.addEventListener('keyup', (e) => {
+        on(document, 'keyup', (e) => {
             if (e.code === 'Space' || e.key === ' ') { this.spaceDown = false; host.classList.remove('pc-space-pan'); }
         });
-        window.addEventListener('blur', () => this.cancelGesture());
-        window.addEventListener('resize', () => this.cancelGesture());
-        host.addEventListener('pointercancel', () => this.cancelGesture());
+        on(window, 'blur', () => this.cancelGesture());
+        on(window, 'resize', () => this.cancelGesture());
+        on(host, 'pointercancel', () => this.cancelGesture());
+        on(host, 'pointerdown', (e) => {
+            if (e.pointerType !== 'mouse' || ![0, 1].includes(e.button) || e.target.closest('button, input, textarea, select, summary, a, [contenteditable="true"]')) return;
+            try { host.setPointerCapture(e.pointerId); } catch { /* synthetic events have no active pointer */ }
+        });
 
         // Where the pointer is on the canvas, so a paste lands under it.
-        host.addEventListener('mousemove', (e) => { if (this.graph) this.pointer = this.toGraph(e.clientX, e.clientY); });
-        host.addEventListener('mouseleave', () => { this.pointer = null; });
+        on(host, 'mousemove', (e) => { if (this.graph) this.pointer = this.toGraph(e.clientX, e.clientY); });
+        on(host, 'mouseleave', () => { this.pointer = null; });
 
-        host.addEventListener('wheel', (e) => {
+        on(host, 'wheel', (e) => {
             if (!this.graph || this.drag || this.linking || this.marquee || this.pan) return;
             e.preventDefault();
             const rect = this.wheelRect ??= host.getBoundingClientRect();
@@ -971,7 +988,7 @@ export class Canvas {
             }, 160);
         }, { passive: false });
 
-        host.addEventListener('mousedown', (e) => {
+        on(host, 'mousedown', (e) => {
             if (!this.graph) return;
             if (e.target.closest('.pc-node-action')) return;
             if (typing(e)) return;
@@ -1120,7 +1137,7 @@ export class Canvas {
 
         });
 
-        window.addEventListener('mousemove', (e) => {
+        on(window, 'mousemove', (e) => {
             if (this.linking) {
                 this.linking.ghost = this.toGraph(e.clientX, e.clientY);
                 this.#drawWires(new Set());
@@ -1213,7 +1230,7 @@ export class Canvas {
             }
         });
 
-        window.addEventListener('mouseup', (e) => {
+        on(window, 'mouseup', (e) => {
             this.frames.flush();
             this.gestureRect = null;
             this.host.classList.remove('pc-interacting');
@@ -1297,7 +1314,7 @@ export class Canvas {
             }
         });
 
-        host.addEventListener('dblclick', (e) => {
+        on(host, 'dblclick', (e) => {
             if (e.target.closest('[data-action]')) return;
             const groupEl = e.target.closest('.pc-node-group, .pc-group-frame-head');
             if (groupEl) {
@@ -1316,7 +1333,7 @@ export class Canvas {
             this.hooks.onCreateAt?.(this.toGraph(e.clientX, e.clientY));
         });
 
-        host.addEventListener('contextmenu', (e) => {
+        on(host, 'contextmenu', (e) => {
             e.preventDefault();
             const nodeEl = e.target.closest('.pc-node[data-id]');
             const groupEl = e.target.closest('.pc-node-group, .pc-group-frame-head');
@@ -1332,8 +1349,8 @@ export class Canvas {
             });
         });
 
-        host.addEventListener('dragover', (e) => { e.preventDefault(); });
-        host.addEventListener('drop', (e) => {
+        on(host, 'dragover', (e) => { e.preventDefault(); });
+        on(host, 'drop', (e) => {
             e.preventDefault();
             const raw = e.dataTransfer?.getData('application/x-prompt-canvas');
             if (!raw) return;
@@ -1353,6 +1370,8 @@ export class Canvas {
      * the block inside it is picked (see #pickInGroup) before wiring.
      */
     async #finishLink(link, targetId, e) {
+        const graph = this.graph, epoch = this.operationEpoch;
+        const current = () => this.graph === graph && this.operationEpoch === epoch;
         const tie = link.dir === 'tie';
         const outward = tie || link.dir === 'out';
         // The two ends, each a block id or "group:<id>".
@@ -1362,11 +1381,13 @@ export class Canvas {
         const at = { clientX: e.clientX, clientY: e.clientY };
         if (typeof from === 'string' && from.startsWith('group:')) {
             const pick = await this.#pickInGroup(from.slice(6), 'out', at);
+            if (!current()) return;
             if (!pick) { this.render(); return; }
             from = pick.id; port = pick.port;
         }
         if (typeof to === 'string' && to.startsWith('group:')) {
             const pick = await this.#pickInGroup(to.slice(6), 'in', at);
+            if (!current()) return;
             if (!pick) { this.render(); return; }
             to = pick.id;
         }
@@ -1430,7 +1451,12 @@ export class Canvas {
      * (hooks.confirmDelete, the "ask before deleting" setting).
      */
     async deleteSelection() {
-        const ask = async (what) => (this.hooks.confirmDelete ? await this.hooks.confirmDelete(what) : true);
+        const graph = this.graph, epoch = this.operationEpoch;
+        if (!graph) return false;
+        const ask = async (what) => {
+            const approved = this.hooks.confirmDelete ? await this.hooks.confirmDelete(what) : true;
+            return approved && this.graph === graph && this.operationEpoch === epoch;
+        };
         if (this.multi.size > 1) {
             const ids = [...this.multi].filter(id => this.graph.nodes[id] && this.graph.nodes[id].type !== NODE_TYPES.OUTPUT);
             if (!ids.length || !await ask(`these ${ids.length} blocks`)) return false;

@@ -21,3 +21,14 @@ export interface CanvasActions {
     model: (id: string, anchor: HTMLElement) => void; group: (id: string, action: string) => void;
 }
 export interface PositionUpdate { id: string; x: number; y: number; w?: number; h?: number }
+export interface HistoryView { undo: boolean; redo: boolean; undoTitle: string; redoTitle: string; note: string; showNote: boolean }
+export interface StatusView { armed: boolean; warning: boolean; text: string; overrideTitle: string; chatPinned: boolean; charPinned: boolean; charTitle: string; isDefault: boolean }
+export interface WorkbenchView {
+    graphs: { id: string; name: string }[]; graphId: string; armed: boolean; sideOpen: boolean; inspectorOpen: boolean;
+    history: HistoryView; status: StatusView; camera: { x: number; y: number; zoom: number; mode: string }; selectionCount: number;
+}
+export interface WorkbenchActions {
+    pickGraph: (id: string) => void; arm: (enabled: boolean) => void; command: (name: string) => void;
+    mode: (mode: string) => void; zoom: (factor: number) => void; fitSelection: () => void;
+    unpin: () => void; pinChat: () => void; pinCharacter: () => void; makeDefault: () => void; preview: () => void;
+}
