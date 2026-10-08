@@ -1,4 +1,13 @@
 import { test, expect } from '@playwright/test';
+test('the first canvas click after editing selects the clicked card', async ({ page }) => {
+    await page.goto('/tests/browser/harness.html'); await page.waitForFunction(() => !!window.canvasHarness);
+    const ids = await page.evaluate(() => window.canvasHarness.reset());
+    await page.locator(`.pc-node[data-id="${ids[0]}"]`).click();
+    await page.locator('.pc-inspector textarea').first().focus();
+    await page.locator(`.pc-node[data-id="${ids[1]}"]`).click();
+    expect(await page.evaluate(() => window.canvasHarness.canvas.selection?.id)).toBe(ids[1]);
+    await expect(page.locator('.pc-inspector textarea').first()).toHaveValue('A short prompt for rendering checks.');
+});
 test('Svelte workbench exposes selection/pan modes and camera controls without remounting editors', async ({ page }) => {
     await page.goto('/tests/browser/harness.html'); await page.waitForFunction(() => !!window.canvasHarness);
     const ids = await page.evaluate(() => window.canvasHarness.reset());
@@ -37,6 +46,30 @@ test('a delayed model list preserves the new graph’s active editor', async ({ 
     });
     expect(retained).toBe(true);
 });
+test('a delayed dynamic prompt refresh preserves another graph’s focused editor', async ({ page }) => {
+    await page.goto('/tests/browser/harness.html'); await page.waitForFunction(() => !!window.canvasHarness);
+    await page.evaluate(() => window.canvasHarness.reset());
+    const other = await page.evaluate(() => {
+        const { context, S, UI, canvas, graph } = window.canvasHarness;
+        context.chatCompletionSettings.prompts = [{ identifier: 'worldInfoBefore', name: 'World info', marker: true }];
+        const dynamic = S.addNode(graph, S.NODE_TYPES.ST, 40, 40); dynamic.identifier = 'worldInfoBefore';
+        const second = S.createGraph('Refresh response target'), prompt = S.addNode(second, S.NODE_TYPES.PROMPT, 40, 40);
+        canvas.select({ kind: 'node', id: dynamic.id }); UI.refreshIfOpen();
+        context.getWorldInfoPrompt = () => new Promise(resolve => { window.answerRefresh = resolve; });
+        return { graph: second.id, prompt: prompt.id };
+    });
+    await page.locator('.pc-inspector').getByText('Refresh', { exact: true }).click();
+    await page.locator('.pc-graph-select').selectOption(other.graph);
+    await page.evaluate(id => window.canvasHarness.canvas.select({ kind: 'node', id }), other.prompt);
+    await page.locator('.pc-inspector textarea').first().focus();
+    const retained = await page.evaluate(async () => {
+        const editor = document.activeElement;
+        window.answerRefresh({ worldInfoBefore: 'Refreshed world info', worldInfoAfter: '' });
+        await window.canvasHarness.settle();
+        return editor === document.activeElement && document.contains(editor);
+    });
+    expect(retained).toBe(true);
+});
 test('a preview from the previous graph cannot overwrite the current canvas', async ({ page }) => {
     await page.goto('/tests/browser/harness.html'); await page.waitForFunction(() => !!window.canvasHarness);
     const ids = await page.evaluate(() => window.canvasHarness.reset());
@@ -69,6 +102,46 @@ test('a delayed rename is cancelled when another graph is opened', async ({ page
         return [window.canvasHarness.S.getGraph(original).name, window.canvasHarness.S.getGraph(other).name];
     }, graphs);
     expect(names).toEqual([graphs.originalName, 'Second canvas']);
+});
+test('an inspector delete confirmation cannot delete from a subsequently opened snapshot', async ({ page }) => {
+    await page.goto('/tests/browser/harness.html'); await page.waitForFunction(() => !!window.canvasHarness);
+    const ids = await page.evaluate(() => window.canvasHarness.reset());
+    const graphs = await page.evaluate(ids => {
+        const { context, S, UI, canvas, graph } = window.canvasHarness;
+        const other = S.createGraph('Imported snapshot');
+        Object.assign(other, structuredClone({ nodes: graph.nodes, wires: graph.wires, groups: graph.groups }));
+        S.settings().ui.confirmDelete = true;
+        context.POPUP_TYPE = { CONFIRM: 'confirm' }; context.POPUP_RESULT = { AFFIRMATIVE: 1 };
+        context.callGenericPopup = () => new Promise(resolve => { window.answerDelete = resolve; });
+        canvas.setMulti(ids.slice(0, 2)); UI.refreshIfOpen();
+        return { original: graph.id, other: other.id };
+    }, ids);
+    await page.locator('.pc-inspector').getByText('Delete these 2 blocks', { exact: true }).click();
+    await page.locator('.pc-graph-select').selectOption(graphs.other);
+    const retained = await page.evaluate(async ({ graphs, ids }) => {
+        window.answerDelete(1); await window.canvasHarness.settle();
+        return [graphs.original, graphs.other].map(id => ids.every(nodeId => !!window.canvasHarness.S.getGraph(id).nodes[nodeId]));
+    }, { graphs, ids });
+    expect(retained).toEqual([true, true]);
+});
+test('a delayed context-menu paste cannot add blocks to a subsequently opened graph', async ({ page }) => {
+    await page.goto('/tests/browser/harness.html'); await page.waitForFunction(() => !!window.canvasHarness);
+    await page.evaluate(() => window.canvasHarness.reset());
+    const graphs = await page.evaluate(() => {
+        const { S, UI, graph } = window.canvasHarness;
+        const other = S.createGraph('Paste response target'); UI.refreshIfOpen();
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText: () => new Promise(resolve => { window.answerClipboard = resolve; }) } });
+        return { original: graph.id, other: other.id, counts: [Object.keys(graph.nodes).length, Object.keys(other.nodes).length] };
+    });
+    const host = page.locator('.pc-canvas'), rect = await host.boundingBox();
+    await host.click({ button: 'right', position: { x: rect.width - 25, y: rect.height - 25 } });
+    await page.locator('.pc-menu').getByText('Paste here', { exact: true }).click();
+    await page.locator('.pc-graph-select').selectOption(graphs.other);
+    const counts = await page.evaluate(async graphs => {
+        window.answerClipboard('Pending clipboard prompt'); await window.canvasHarness.settle();
+        return [graphs.original, graphs.other].map(id => Object.keys(window.canvasHarness.S.getGraph(id).nodes).length);
+    }, graphs);
+    expect(counts).toEqual(graphs.counts);
 });
 test('close and reopen reuse one workbench and reset its inspector selection', async ({ page }) => {
     await page.goto('/tests/browser/harness.html'); await page.waitForFunction(() => !!window.canvasHarness);

@@ -1,10 +1,10 @@
 /**
  * Silly Canvas — the canvas renderer.
  *
- * Hand-rolled on SVG plus absolutely positioned DOM, deliberately. A graph
- * library would mean either a bundler step or a CDN dependency, and neither
- * survives a SillyTavern update gracefully. This way the nodes are ordinary
- * elements that inherit your theme and respond to ordinary CSS.
+ * Keyed Svelte components render SVG wires and absolutely positioned cards.
+ * The native controller owns graph edits, cached geometry and frame scheduling;
+ * camera motion only changes the viewport and grid. The compiled UI ships with
+ * the extension, and its ordinary DOM elements inherit the SillyTavern theme.
  *
  * Flow is top to bottom: the out port sits on the bottom edge, the in port on
  * the top edge, and wires curve downward. Reading order follows vertical
@@ -562,6 +562,7 @@ export class Canvas {
     cancelGesture() {
         this.operationEpoch++;
         const active = !!(this.drag || this.marquee || this.pan || this.linking);
+        const wheeling = !!this.wheelRect;
         this.frames.cancel(); clearTimeout(this.wheelTimer);
         this.gestureRect = null; this.wheelRect = null;
         const d = this.drag;
@@ -593,6 +594,8 @@ export class Canvas {
             const picked = sel?.kind === 'node' ? this.graph.nodes[sel.id] : sel?.kind === 'group' ? this.graph.groups?.[sel.id] : sel?.kind === 'wire' ? this.graph.wires[sel.id] : null;
             this.hooks.onSelect?.(picked, sel?.kind ?? null); this.hooks.onMulti?.([...this.multi]);
         }
+        else if (wheeling && this.graph) this.applyTransform();
+        if (wheeling && this.graph) touchGraph(this.graph);
         return active;
     }
 
@@ -949,7 +952,8 @@ export class Canvas {
     #bind() {
         const host = this.host;
         const on = (target, type, handler, options = {}) => target.addEventListener(type, handler, { ...options, signal: this.eventController.signal });
-        const typing = (e) => e.target?.closest?.('input, textarea, select, [contenteditable="true"]') || document.activeElement?.matches?.('input, textarea, select, [contenteditable="true"]');
+        const inEditor = (e) => e.target?.closest?.('input, textarea, select, [contenteditable="true"]');
+        const typing = (e) => inEditor(e) || document.activeElement?.matches?.('input, textarea, select, [contenteditable="true"]');
         on(document, 'keydown', (e) => {
             const root = host.closest('.pc-root');
             if (root && !root.classList.contains('pc-open')) return;
@@ -991,7 +995,7 @@ export class Canvas {
         on(host, 'mousedown', (e) => {
             if (!this.graph) return;
             if (e.target.closest('.pc-node-action')) return;
-            if (typing(e)) return;
+            if (inEditor(e)) return;
             this.gestureRect = host.getBoundingClientRect();
             if (e.button === 1 || (e.button === 0 && (this.spaceDown || this.mode === 'pan'))) {
                 e.preventDefault();
@@ -1045,7 +1049,7 @@ export class Canvas {
                 }
                 if (g.collapsed && (this.multi.size > members.length || e.shiftKey) && members.every(id => this.multi.has(id))) {
                     const start = this.toGraph(e.clientX, e.clientY);
-                    this.drag = { several: [...this.multi].map(id => [id, this.graph.nodes[id].x, this.graph.nodes[id].y]), groups: this.#selectedGroupStarts(), sx: start.x, sy: start.y, moved: false };
+                    this.drag = { several: [...this.multi].map(id => [id, this.graph.nodes[id].x, this.graph.nodes[id].y]), groups: this.#selectedGroupStarts(), clickedGroup: e.shiftKey ? null : gid, sx: start.x, sy: start.y, moved: false };
                     return;
                 }
                 this.multi.clear();
@@ -1132,6 +1136,7 @@ export class Canvas {
                 box.style.display = 'none';
                 this.nodeLayer.append(box);
                 this.marquee = { x0: p.x, y0: p.y, x1: p.x, y1: p.y, cx: e.clientX, cy: e.clientY, box, mode: selectionMode(e), initial: this.#pickedIds(), moved: false };
+                host.classList.add('pc-interacting');
                 e.preventDefault();
                 return;
             }
@@ -1283,6 +1288,7 @@ export class Canvas {
                     this.hooks.onChange?.();
                 }
                 else if (d.clicked) this.setMulti([d.clicked]);
+                else if (d.clickedGroup) { this.setMulti([]); this.select({ kind: 'group', id: d.clickedGroup }); }
                 this.render();
                 return;
             }

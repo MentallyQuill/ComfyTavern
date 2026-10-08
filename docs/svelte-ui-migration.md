@@ -41,7 +41,7 @@ Plain empty-space drag selects an intersecting rectangle in any direction. Shift
 
 Middle-drag and Space+left-drag pan over cards without changing selection. Select/Pan controls make both modes discoverable. Wheel deltas respect magnitude and pixel/line/page units, keep the graph point under the cursor, and clamp zoom to 25–250%. Ctrl/Cmd+A includes folded members, Ctrl/Cmd+G groups selected blocks, and period fits the selection. Output keeps its delete/group protection. Escape restores an unfinished gesture, then clears selection, then closes the workbench. Text inputs, selects and contenteditable keep browser shortcuts; focused buttons keep Space/Enter activation.
 
-Graph switch, close, resize, pointer cancellation and blur cancel partial gestures. Outstanding confirmations, group-member pickers, graph actions and previews are guarded against a changed graph/session. Delayed model lists cannot replace another graph’s active editor. `Canvas.destroy()` releases host/document/window listeners, pending frames and ResizeObserver, then unmounts Svelte. Close/reopen retains one workbench/controller instance.
+Graph switch, close, resize, pointer cancellation and blur cancel partial gestures. Canvas deletion confirmations, group-member pickers, graph actions, context-menu clipboard reads and previews are guarded against a changed graph/session. Delayed model lists and dynamic-prompt refreshes cannot replace another graph’s active editor. Interrupted wheel updates reconcile the visible camera with graph coordinates. `Canvas.destroy()` releases host/document/window listeners, pending frames and ResizeObserver, then unmounts Svelte. Close/reopen retains one workbench/controller instance.
 
 ## Parity and verification
 
@@ -58,7 +58,7 @@ Graph switch, close, resize, pointer cancellation and blur cancel partial gestur
 | Host entry, launchers, open/close/reopen, shared graph state | Browser harness loads actual `index.js`; installed-copy smoke has no build tools or `node_modules` |
 | Desktop/narrow, keyboard/contenteditable, reduced motion | 1440×1000 and 700×900 captures, Neon/Parchment visual inspection, Chromium keyboard/layout tests |
 
-The release check is `npm run check`: 44 Node test files, Svelte checking with zero errors/warnings, production build, 62 consistent local asset imports and 21 Chromium acceptance cases. Model-provider responses and SillyTavern are mocked; verification makes no production generation calls.
+The release check is `npm run check`: 44 Node test files, Svelte checking with zero errors/warnings, production build, 62 consistent local asset imports and 25 Chromium acceptance cases. Model-provider responses and SillyTavern are mocked; verification makes no production generation calls. The [independent review and fix evidence](superpowers/reviews/2026-10-07-svelte-ui-migration.md) records the complete review disposition.
 
 `npm run smoke:install` copies only the installed extension assets and host fixture to a fresh temporary directory. It verifies the actual launcher API, shared domain graph, Svelte root, cards and reopen behavior without developer UI source or dependencies; all 35 browser requests are local with no missing files or page errors. `npm run capture` saves ignored screenshots/metrics. Desktop/narrow headers have no horizontal overflow, and canvas dimensions stay usable. The harness omits SillyTavern’s icon font, so production icons are covered by preserved classes and accessible labels.
 

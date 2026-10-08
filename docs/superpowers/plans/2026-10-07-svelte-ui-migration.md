@@ -117,8 +117,8 @@
 - [x] Run matched Chromium benchmarks and verify deterministic camera/identity/scheduler budgets plus local p95 <=1 ms camera handling and median <=18 ms / p95 <=25 ms steady frames.
 - [x] Inspect real desktop/narrow screenshots and refine spacing/focus/contrast without reintroducing slow paint effects; verify reduced-motion behavior.
 - [x] Run full `npm.cmd run check`, fresh production install/harness smoke, and reproducible build comparison. Record limitations and adapter boundaries explicitly.
-- [ ] Commit final source, generated assets and documentation, then request a fresh-context whole-branch review against the spec, plan and ledger.
-- [ ] Address important findings with RED/GREEN evidence; rerun affected checks and whole suite where warranted.
+- [x] Commit final source, generated assets and documentation, then request a fresh-context whole-branch review against the spec, plan and ledger.
+- [x] Address important findings with RED/GREEN evidence; rerun affected checks and whole suite where warranted.
 - [ ] Mark the goal complete only after the full acceptance contract is met; hand off the committed branch and concise verification evidence.
 
 ## Execution ledger

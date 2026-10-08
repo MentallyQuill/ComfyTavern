@@ -1468,9 +1468,12 @@ function renderStFields(box, node) {
         refresh.innerHTML = '<i class="fa-solid fa-rotate"></i> Refresh';
         refresh.title = 'Re-read world info, character fields and injections';
         refresh.addEventListener('click', async () => {
+            const graph = current, epoch = uiEpoch;
             refresh.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Reading';
             await refreshLive();
-            renderInspector();
+            if (!stillEditing(graph, epoch) || selected !== node || !refresh.isConnected) return;
+            refresh.innerHTML = '<i class="fa-solid fa-rotate"></i> Refresh';
+            if (!box.contains(document.activeElement)) renderInspector();
             canvas.render();
         });
         box.append(refresh);
@@ -3503,11 +3506,13 @@ async function okToDelete(what) {
 
 /** Delete blocks, from a button or a menu. */
 async function deleteBlocks(ids) {
-    ids = ids.filter(id => current.nodes[id] && current.nodes[id].type !== NODE_TYPES.OUTPUT);
+    const graph = current, epoch = uiEpoch;
+    ids = ids.filter(id => graph.nodes[id] && graph.nodes[id].type !== NODE_TYPES.OUTPUT);
     if (!ids.length) return;
-    const what = ids.length === 1 ? `"${current.nodes[ids[0]].title || 'Untitled'}"` : `these ${ids.length} blocks`;
+    const what = ids.length === 1 ? `"${graph.nodes[ids[0]].title || 'Untitled'}"` : `these ${ids.length} blocks`;
     if (!await okToDelete(what)) return;
-    for (const id of ids) removeNode(current, id);
+    if (!stillEditing(graph, epoch)) return;
+    for (const id of ids) removeNode(graph, id);
     canvas.setMulti([]);
     selected = null; selectedKind = null;
     canvas.select(null);
@@ -3693,7 +3698,9 @@ function onCanvasMenu({ event, node, wire, at, group = null, several = null }) {
             }));
         }
         menu.append(item(lastClip() ? `Paste ${describeClip(lastClip())} here` : 'Paste here', 'fa-paste', async () => {
+            const graph = current, epoch = uiEpoch;
             const clip = await fromClipboard();
+            if (!stillEditing(graph, epoch)) return;
             if (!pasteOnCanvas(clip, at)) toast('Nothing to paste. Copy some blocks first (Ctrl+C).', 'info');
         }));
         menu.append(item('New group here (an empty blanket)', 'fa-object-group', () => {
