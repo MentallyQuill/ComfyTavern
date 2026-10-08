@@ -36,3 +36,14 @@ test('ResizeObserver refreshes wire endpoints after a card grows', async ({ page
     await expect.poll(() => page.evaluate(() => window.resizeProbe.path.getAttribute('d'))).not.toBe(before);
     expect(await page.evaluate(() => window.canvasHarness.canvas.svg.contains(window.resizeProbe.path))).toBe(true);
 });
+test('graph projections and selection updates preserve mounted cards and ports', async ({ page }) => {
+    const ids = await setup(page);
+    const result = await page.evaluate(id => {
+        const { canvas, graph } = window.canvasHarness;
+        const card = canvas.nodeLayer.querySelector(`[data-id="${id}"]`), port = card.querySelector('.pc-port-in');
+        graph.nodes[id].title = 'Edited title'; canvas.render();
+        canvas.select({ kind: 'node', id });
+        return { card: canvas.nodeLayer.contains(card), port: card.contains(port), title: card.querySelector('.pc-node-title').textContent };
+    }, ids[0]);
+    expect(result).toEqual({ card: true, port: true, title: 'Edited title' });
+});

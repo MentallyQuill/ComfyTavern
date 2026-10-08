@@ -252,6 +252,9 @@
 .pc-canvas-host.pc-panning { cursor: grabbing; }
 
 .pc-viewport { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+.pc-node-action { appearance: none; border: 0; background: none; color: inherit; font: inherit; padding: 0; }
+.pc-node-action:focus-visible { outline: 2px solid var(--pc-flow); outline-offset: 3px; }
+.pc-node-model-pick { display: block; width: 100%; text-align: left; }
 .pc-canvas-host.pc-interacting .pc-viewport, .pc-canvas-host.pc-panning .pc-viewport { will-change: transform; }
 :root .pc-canvas-host.pc-interacting .pc-wire, :root .pc-canvas-host.pc-panning .pc-wire { filter: none; }
 .pc-wires { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }

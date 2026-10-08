@@ -20,6 +20,8 @@ import { graphPoint, zoomAt, wheelFactor } from './canvas/camera.js?v=0.17.0';
 import { createFrameScheduler } from './canvas/frame.js?v=0.17.0';
 import { selectionMode, rectangle, intersects, combineSelection } from './canvas/selection.js?v=0.17.0';
 import { createGeometryCache, indexIncidentWires } from './canvas/geometry.js?v=0.17.0';
+import { nodeCard } from './canvas/presentation.js?v=0.17.0';
+import { mountCanvas } from '../dist/silly-canvas-ui.js?v=0.17.0';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -139,25 +141,20 @@ export class Canvas {
         this.geometry = createGeometryCache();
         this.nodeElements = new Map();
         this.incident = new Map();
-        this.wireElements = new Map();
+        this.wireViews = new Map();
 
         host.classList.add('pc-canvas');
         host.tabIndex = 0;
         host.innerHTML = '';
 
-        this.viewport = document.createElement('div');
-        this.viewport.className = 'pc-viewport';
-
-        this.svg = document.createElementNS(SVG_NS, 'svg');
-        this.svg.classList.add('pc-wires');
-        this.svg.setAttribute('width', '100%');
-        this.svg.setAttribute('height', '100%');
-
-        this.nodeLayer = document.createElement('div');
-        this.nodeLayer.className = 'pc-nodes';
-
-        this.viewport.append(this.svg, this.nodeLayer);
-        host.append(this.viewport);
+        this.layer = mountCanvas(host, {
+            hover: id => this.setHover(id),
+            toggle: id => { const node = this.graph?.nodes[id]; if (!node) return; node.enabled = node.enabled === false; touchGraph(this.graph); this.render(); this.hooks.onChange?.(); },
+            help: id => this.hooks.onHelp?.(this.graph?.nodes[id]),
+            model: (id, anchor) => this.hooks.onModelClick?.(this.graph?.nodes[id], anchor),
+            group: (id, action) => { if (action === 'toggle') this.toggleGroup(id); else this.setCollapsed(id, action === 'collapse'); },
+        });
+        this.viewport = this.layer.viewport; this.svg = this.layer.svg; this.nodeLayer = this.layer.nodeLayer;
 
         this.frames = createFrameScheduler(flags => {
             if (flags & 1) this.applyTransform();
@@ -215,35 +212,7 @@ export class Canvas {
     }
 
     /** The token chip for a block's header, or null. */
-    #tokenChip(node) {
-        const fmt = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${n}`);
-        const t = this.tokens?.get(node.id);
-        const tr = this.trace?.get(node.id);
-        const chip = document.createElement('span');
-        chip.className = 'pc-tok';
-        const how = t && t.exact === false ? 'estimated at four characters a token' : 'counted with SillyTavern\u2019s tokenizer for the current model';
-        const approx = t && t.exact === false ? '\u2248' : '';
-        if (t && node.type === NODE_TYPES.OUTPUT && t.total) {
-            chip.textContent = `${approx}${fmt(t.total)} tok`;
-            chip.title = `The whole prompt this canvas would send right now: ${t.total.toLocaleString()} tokens (${how}).`;
-            chip.classList.add('pc-tok-total');
-        } else if (t && node.type === NODE_TYPES.GENERATE && t.in !== undefined) {
-            chip.textContent = `${approx}${fmt(t.in)} \u2192 \u2264${fmt(t.out)}`;
-            chip.title = `This block is asked about ${t.in.toLocaleString()} tokens and may answer with up to ${t.out.toLocaleString()} (its "Longest reply"). Tokens ${how}.`;
-        } else if (t && t.own) {
-            chip.textContent = `${approx}${fmt(t.own)} tok`;
-            chip.title = t.loose
-                ? `${t.own.toLocaleString()} tokens of its own text (${how}). Not in the prompt right now: nothing it is wired to reaches Output on this send.`
-                : `This block adds ${t.own.toLocaleString()} tokens of its own text (${how}). Counted again as you edit.`;
-            if (t.loose) chip.classList.add('pc-tok-loose');
-        } else if (!t && tr?.chars && tr.status === 'in') {
-            // No live count (switched off in the settings): the last preview's estimate.
-            const n = Math.ceil(tr.chars / 4);
-            chip.textContent = `\u2248${fmt(n)} tok`;
-            chip.title = 'About how many tokens this block adds (its own text, from the last preview)';
-        } else return null;
-        return chip;
-    }
+
 
     applyTransform() {
         const v = this.view;
@@ -387,42 +356,25 @@ export class Canvas {
     }
 
     #drawNodes() {
-        const frag = document.createDocumentFragment();
         this.reaching = this.#reaching();
         const groups = this.graph.groups ?? {};
-        // A folded group whose blocks have all gone goes too. An open blanket
-        // may be empty: it is waiting for blocks to be put on it.
-        for (const [gid, g] of Object.entries(groups)) {
-            if ((g.collapsed || !g.frame) && !Object.values(this.graph.nodes).some(n => n.inGroup === gid)) delete groups[gid];
-        }
-        const nodes = Object.values(this.graph.nodes)
-            .filter(n => !this.#folded(n))
-            .sort((a, b) => (a.y - b.y) || (a.x - b.x));
-
-        for (const node of nodes) {
-            frag.append(this.#nodeElement(node));
-        }
-        for (const g of Object.values(groups)) if (g.collapsed) frag.append(this.#groupElement(g));
-        this.nodeLayer.innerHTML = '';
-        this.nodeLayer.append(frag);
-        this.#measureNodes();
-        // Open groups get a frame drawn around their blocks, behind them,
-        // once the blocks are on the page and their heights are known.
-        for (const g of Object.values(groups)) if (!g.collapsed) this.#groupFrame(g);
+        for (const [gid, g] of Object.entries(groups)) if ((g.collapsed || !g.frame) && !Object.values(this.graph.nodes).some(n => n.inGroup === gid)) delete groups[gid];
+        const context = { graph: this.graph, selection: this.selection, multi: this.multi, trace: this.trace, tokens: this.tokens, reaching: this.reaching, hooks: this.hooks, preview: node => this.#preview(node), ruleLabel, labels: TYPE_LABEL, icons: TYPE_ICON };
+        const cards = Object.values(this.graph.nodes).filter(n => !this.#folded(n)).sort((a, b) => (a.y - b.y) || (a.x - b.x)).map(node => nodeCard(node, context));
+        this.layer.setNodes(cards);
+        this.resizeObserver?.disconnect(); this.nodeElements.clear();
+        this.#measureCards('.pc-node[data-id]');
+        this.layer.setGroups(Object.values(groups).map(g => this.#groupCard(g)));
+        this.#measureCards('.pc-node-group');
+        this.geometry.retain(this.nodeElements.keys());
         this.#paintMulti();
     }
 
-    /** The folded group a block is hidden in, if any. */
-    #measureNodes() {
-        this.resizeObserver?.disconnect();
-        this.nodeElements.clear();
-        for (const el of this.nodeLayer.querySelectorAll('.pc-node')) {
-            const id = el.dataset.id ?? `group:${el.dataset.group}`;
-            this.nodeElements.set(id, el);
-            this.geometry.update(id, el.offsetHeight);
-            this.resizeObserver?.observe(el);
+    #measureCards(selector) {
+        for (const el of this.nodeLayer.querySelectorAll(selector)) {
+            const id = el.dataset.id ?? 'group:' + el.dataset.group;
+            this.nodeElements.set(id, el); this.geometry.update(id, el.offsetHeight); this.resizeObserver?.observe(el);
         }
-        this.geometry.retain(this.nodeElements.keys());
     }
 
     #folded(node) {
@@ -443,69 +395,26 @@ export class Canvas {
     }
 
     /** A folded group, drawn as one block. */
-    #groupElement(g) {
+    #groupCard(g) {
         const members = groupMembers(this.graph, g.id).sort((a, b) => (a.y - b.y) || (a.x - b.x));
-        const el = document.createElement('div');
-        el.className = `pc-node pc-node-group${this.selection?.kind === 'group' && this.selection.id === g.id ? ' pc-selected' : ''}${g.enabled === false ? ' pc-off pc-group-is-off' : ''}`;
-        el.dataset.group = g.id;
-        el.style.left = `${g.x}px`;
-        el.style.top = `${g.y}px`;
-        el.style.width = `${g.w || 260}px`;
-        const head = document.createElement('div');
-        head.className = 'pc-node-head';
-        const badge = document.createElement('span');
-        badge.className = 'pc-badge';
-        const icon = document.createElement('i');
-        icon.className = 'fa-solid fa-object-group pc-badge-icon';
-        badge.append(icon, ' Group');
-        const title = document.createElement('span');
-        title.className = 'pc-node-title';
-        title.textContent = g.title || 'Group';
-        head.append(badge, title);
-        const groupTok = members.reduce((n, m) => n + (this.tokens?.get(m.id)?.own ?? 0), 0);
-        if (groupTok && g.enabled !== false) {
-            const chip = document.createElement('span');
-            chip.className = 'pc-tok';
-            chip.textContent = groupTok >= 1000 ? `${(groupTok / 1000).toFixed(1)}k tok` : `${groupTok} tok`;
-            chip.title = `The blocks in this group add ${groupTok.toLocaleString()} tokens of their own text.`;
-            head.append(chip);
-        }
-        if (g.enabled === false) head.append(this.#offPill('This whole group is switched off. Nothing in it is sent, and nothing passes through it.'));
-        head.append(this.#groupButton('open', 'fa-up-right-and-down-left-from-center', 'Open the group: lay it out as a blanket you can put blocks on and take them off'));
-        head.append(this.#groupToggle(g));
-        const body = document.createElement('div');
-        body.className = 'pc-node-body';
-        body.textContent = `${members.length} blocks: ${members.map(n => n.title || 'Untitled').join(' \u00b7 ')}`;
-        el.append(head, body);
-        const { ins, outs } = this.#groupEdges(g.id);
-        const name = (id) => this.graph.nodes[id]?.title || 'Untitled';
-        const io = document.createElement('div');
-        io.className = 'pc-node-model pc-group-io';
-        const inNames = [...new Set(ins.map(w => name(w.from)))];
-        const outNames = [...new Set(outs.map(w => name(w.to)))];
-        io.textContent = `${inNames.length ? `in: ${inNames.join(', ')}` : 'nothing wired in'}  \u2192  ${outNames.length ? `out: ${outNames.join(', ')}` : 'goes nowhere'}`;
-        el.append(io);
-        const hint = document.createElement('div');
-        hint.className = 'pc-node-cond';
-        hint.textContent = g.enabled === false ? 'switched off \u2014 nothing goes through' : 'double-click to open';
-        el.append(hint);
-        // Real handles: drag from the bottom one to wire a block inside out
-        // of the group, onto the top one (or anywhere on the group) to wire
-        // something in. Which block inside is used: see groupEnds().
-        for (const dir of ['in', 'out']) {
-            const dot = document.createElement('div');
-            dot.className = `pc-gport pc-gport-${dir}`;
-            dot.dataset.gport = dir;
-            dot.dataset.group = g.id;
-            dot.title = dir === 'out'
-                ? 'Drag to wire a block in this group into another block'
-                : 'Drag up to a block to wire it into this group';
-            el.append(dot);
-        }
-        return el;
+        if (!g.collapsed) this.#groupFrame(g);
+        const frame = g.frame ?? { x: g.x, y: g.y, w: g.w || 260, h: 140 };
+        const selected = this.selection?.kind === 'group' && this.selection.id === g.id;
+        const multi = members.length && members.every(n => this.multi.has(n.id));
+        const groupTokens = members.reduce((n, m) => n + (this.tokens?.get(m.id)?.own ?? 0), 0);
+        const edges = this.#groupEdges(g.id), name = id => this.graph.nodes[id]?.title || 'Untitled';
+        const ins = [...new Set(edges.ins.map(w => name(w.from)))], outs = [...new Set(edges.outs.map(w => name(w.to)))];
+        return {
+            id: g.id, collapsed: !!g.collapsed, x: g.collapsed ? g.x : frame.x, y: g.collapsed ? g.y : frame.y, w: g.collapsed ? g.w || 260 : frame.w, h: frame.h,
+            className: g.collapsed ? 'pc-node pc-node-group' + (selected ? ' pc-selected' : '') + (multi ? ' pc-multi' : '') + (g.enabled === false ? ' pc-off pc-group-is-off' : '') : 'pc-group-frame' + (selected ? ' pc-selected' : '') + (g.enabled === false ? ' pc-group-is-off' : '') + (members.length ? '' : ' pc-group-empty'),
+            title: g.title || 'Group', enabled: g.enabled !== false,
+            body: members.length + ' blocks: ' + members.map(n => n.title || 'Untitled').join(' · '),
+            io: (ins.length ? 'in: ' + ins.join(', ') : 'nothing wired in') + '  →  ' + (outs.length ? 'out: ' + outs.join(', ') : 'goes nowhere'),
+            count: members.length ? members.length + ' block' + (members.length === 1 ? '' : 's') : 'empty — drag blocks onto it',
+            token: groupTokens && g.enabled !== false ? { className: 'pc-tok', text: groupTokens >= 1000 ? (groupTokens / 1000).toFixed(1) + 'k tok' : groupTokens + ' tok', title: 'The blocks in this group add ' + groupTokens.toLocaleString() + ' tokens of their own text.' } : null,
+        };
     }
 
-    /** Height of a block on screen, for deciding what rests where. */
     heightOf(node) {
         return this.geometry.get(node?.id);
     }
@@ -535,64 +444,10 @@ export class Canvas {
             if (right > f.x + f.w) f.w = Math.round(right - f.x);
             if (bottom > f.y + f.h) f.h = Math.round(bottom - f.y);
         }
-        const frame = document.createElement('div');
-        frame.className = `pc-group-frame${this.selection?.kind === 'group' && this.selection.id === g.id ? ' pc-selected' : ''}${g.enabled === false ? ' pc-group-is-off' : ''}${members.length ? '' : ' pc-group-empty'}`;
-        frame.dataset.group = g.id;
-        frame.style.left = `${f.x}px`;
-        frame.style.top = `${f.y}px`;
-        frame.style.width = `${f.w}px`;
-        frame.style.height = `${f.h}px`;
-        const head = document.createElement('div');
-        head.className = 'pc-group-frame-head';
-        const icon = document.createElement('i');
-        icon.className = 'fa-solid fa-object-group';
-        const t = document.createElement('span');
-        t.className = 'pc-group-frame-title';
-        t.textContent = g.title || 'Group';
-        const count = document.createElement('span');
-        count.className = 'pc-group-frame-count';
-        count.textContent = members.length ? `${members.length} block${members.length === 1 ? '' : 's'}` : 'empty \u2014 drag blocks onto it';
-        head.append(icon, t, count);
-        if (g.enabled === false) head.append(this.#offPill('This whole group is switched off. Nothing in it is sent, and nothing passes through it.'));
-        head.append(this.#groupToggle(g));
-        head.append(this.#groupButton('collapse', 'fa-down-left-and-up-right-to-center', 'Fold: everything on the blanket becomes one block'));
-        frame.append(head);
-        const grip = document.createElement('div');
-        grip.className = 'pc-group-resize';
-        grip.dataset.action = 'resize';
-        grip.title = 'Drag to make the blanket bigger or smaller';
-        frame.append(grip);
-        this.nodeLayer.prepend(frame);
     }
 
-    #offPill(title) {
-        const off = document.createElement('span');
-        off.className = 'pc-off-pill';
-        off.textContent = 'OFF';
-        off.title = title;
-        return off;
-    }
 
-    #groupButton(action, icon, title) {
-        const b = document.createElement('i');
-        b.className = `fa-solid ${icon} pc-group-btn`;
-        b.dataset.action = action;
-        b.title = title;
-        return b;
-    }
 
-    #groupToggle(g) {
-        const off = g.enabled === false;
-        const t = document.createElement('div');
-        t.className = `pc-toggle fa-solid ${off ? 'fa-toggle-off pc-toggle-off' : 'fa-toggle-on pc-toggle-on'}`;
-        t.dataset.action = 'toggle';
-        t.title = off
-            ? 'The whole group is off \u2014 click to switch it on'
-            : 'Switch the whole group off: nothing in it is sent, and nothing passes through it';
-        return t;
-    }
-
-    /** Switch a whole group on or off. */
     toggleGroup(gid) {
         const g = this.graph.groups?.[gid];
         if (!g) return;
@@ -774,296 +629,7 @@ export class Canvas {
         this.hooks.onChange?.();
     }
 
-    #nodeElement(node) {
-        const el = document.createElement('div');
-        el.className = `pc-node pc-node-${node.type}`;
-        el.dataset.id = node.id;
-        el.style.left = `${node.x}px`;
-        el.style.top = `${node.y}px`;
-        el.style.width = `${node.w || 260}px`;
-        if (node.enabled === false) el.classList.add('pc-off');
-        const groupOff = inOffGroup(this.graph, node);
-        if (groupOff) el.classList.add('pc-off', 'pc-group-off');
-        if (node.type !== NODE_TYPES.NOTE && node.type !== NODE_TYPES.OUTPUT
-            && this.reaching && !this.reaching.has(node.id)) {
-            el.classList.add('pc-stranded');
-            el.title = 'Not wired through to Output, so this block does nothing.';
-        }
-        if (this.selection?.kind === 'node' && this.selection.id === node.id) el.classList.add('pc-selected');
 
-        const t = this.trace?.get(node.id);
-        if (t) el.classList.add(`pc-trace-${t.status}`);
-        el.addEventListener('mouseenter', () => this.setHover(node.id));
-        el.addEventListener('mouseleave', () => { if (this.hoverId === node.id) this.setHover(null); });
-
-        const head = document.createElement('div');
-        head.className = 'pc-node-head';
-
-        const badge = document.createElement('span');
-        badge.className = 'pc-badge';
-        const icon = document.createElement('i');
-        icon.className = `fa-solid ${TYPE_ICON[node.type] ?? 'fa-square'} pc-badge-icon`;
-        badge.append(icon, ` ${TYPE_LABEL[node.type] ?? node.type}`);
-
-        const title = document.createElement('span');
-        title.className = 'pc-node-title';
-        title.textContent = node.title || 'Untitled';
-        title.title = node.title || '';
-
-        head.append(badge, title);
-        // How much of the prompt this block is.
-        const chip = this.#tokenChip(node);
-        if (chip) head.append(chip);
-        if (groupOff && node.enabled !== false) {
-            head.append(this.#offPill('Its group is switched off, so this block sends nothing and nothing passes through it.'));
-        } else if (node.enabled === false) {
-            const off = document.createElement('span');
-            off.className = 'pc-off-pill';
-            off.textContent = 'OFF';
-            off.title = 'This block is switched off. Its own text is not sent; anything wired through it still passes.';
-            head.append(off);
-        }
-
-        if (node.type !== NODE_TYPES.OUTPUT) {
-            const toggle = document.createElement('div');
-            toggle.className = `pc-toggle fa-solid ${node.enabled === false ? 'fa-toggle-off pc-toggle-off' : 'fa-toggle-on pc-toggle-on'}`;
-            toggle.title = node.enabled === false ? 'Switched off \u2014 click to switch on' : 'Switched on \u2014 click to switch off';
-            toggle.addEventListener('mousedown', e => e.stopPropagation());
-            toggle.addEventListener('click', (e) => {
-                e.stopPropagation();
-                node.enabled = node.enabled === false;
-                touchGraph(this.graph);
-                this.render();
-                this.hooks.onChange?.();
-            });
-            head.append(toggle);
-        }
-
-        const body = document.createElement('div');
-        body.className = 'pc-node-body';
-        body.textContent = this.#preview(node);
-
-        el.append(head, body);
-
-        if (node.type === NODE_TYPES.DECIDER) {
-            body.remove();
-            const list = document.createElement('div');
-            list.className = 'pc-dec-keys';
-            const chosen = this.trace?.get(node.id)?.decision ?? null;
-            const keys = deciderKeys(node);
-            const routing = routingOf(node);
-            const mode = document.createElement('div');
-            mode.className = `pc-dec-mode${routing ? '' : ' pc-dec-unset'}`;
-            mode.textContent = routing
-                ? (routing === 'ai' && node.sorter?.engine === 'jev' ? 'Jev picks the outputs that apply' : ROUTING_WORDS[routing])
-                : 'Not set up yet \u2014 select it and choose how it routes';
-            list.append(mode);
-            if (routing === 'random') {
-                const total = keys.reduce((n, k) => n + Math.max(0, Number(k.weight ?? 1)), 0) || 1;
-                for (const k of keys) list.append(this.#keyRow(k, `${Math.round(100 * Math.max(0, Number(k.weight ?? 1)) / total)}%`, took(chosen, k.id)));
-            } else if (routing) {
-                for (const k of node.keys ?? []) {
-                    let say;
-                    if (routing === 'ai') {
-                        const d = String(k.description ?? '').trim();
-                        say = d ? (d.length > 60 ? d.slice(0, 60) + '\u2026' : d) : 'no description yet';
-                    } else {
-                        const rules = (k.conditions ?? []).map(ruleLabel).filter(Boolean);
-                        const join = k.match === 'all' ? ' and ' : ' or ';
-                        say = rules.length ? `if ${rules.join(join)}` : 'no rules yet';
-                    }
-                    list.append(this.#keyRow(k, say, took(chosen, k.id)));
-                }
-                if (node.fallback) list.append(this.#keyRow(node.fallback, 'when nothing else fires', took(chosen, node.fallback.id), true));
-            }
-            el.append(list);
-
-            // "?" opens the guide.
-            const help = document.createElement('div');
-            help.className = 'pc-help-btn fa-solid fa-circle-question';
-            help.title = 'How Deciders work';
-            help.addEventListener('mousedown', e => e.stopPropagation());
-            help.addEventListener('click', (e) => { e.stopPropagation(); this.hooks.onHelp?.(node); });
-            head.insertBefore(help, head.querySelector('.pc-toggle'));
-        }
-
-        if (node.type === NODE_TYPES.STATE) {
-            body.remove();
-            const list = document.createElement('div');
-            list.className = 'pc-dec-keys pc-state-rows';
-            const st = this.trace?.get(node.id)?.state ?? null;
-            if (!(node.values ?? []).length) {
-                const none = document.createElement('div');
-                none.className = 'pc-dec-mode pc-dec-unset';
-                none.textContent = 'No values yet \u2014 select it and add one';
-                list.append(none);
-            }
-            for (const v of node.values ?? []) {
-                const val = st ? st[v.id] : undefined;
-                const stage = val === undefined ? null : (v.stages ?? []).find(s => {
-                    const lo = s.from === '' || s.from == null ? -Infinity : Number(s.from);
-                    const hi = s.to === '' || s.to == null ? Infinity : Number(s.to);
-                    return Number(val) >= lo && Number(val) <= hi;
-                });
-                const shown = val === undefined ? `starts at ${v.start ?? 0}` : `${val}${v.kind !== 'text' && v.max !== '' && v.max != null ? `/${v.max}` : ''}${stage?.name ? ` \u00b7 ${stage.name}` : ''}`;
-                const rules = (v.rules ?? []).length;
-                list.append(this.#keyRow(v, `${shown}${rules ? ` \u00b7 ${rules} rule${rules === 1 ? '' : 's'}` : ''}${(v.stages ?? []).length ? ` \u00b7 ${v.stages.length} stages${v.stageDots ? ' with dots' : ''}` : ''}`, !!(stage?.text || stage?.promptId)));
-            }
-            el.append(list);
-        }
-
-        if (node.type !== NODE_TYPES.DECIDER && node.type !== NODE_TYPES.STATE && node.condition && node.condition.mode !== 'always') {
-            const cond = document.createElement('div');
-            cond.className = 'pc-node-cond';
-            cond.innerHTML = `<i class="fa-solid fa-code-branch"></i> ${esc(this.#conditionLabel(node.condition))}`;
-            el.append(cond);
-        }
-
-        if (node.profileId || node.type === NODE_TYPES.GENERATE) {
-            const model = document.createElement('div');
-            model.className = 'pc-node-model';
-            const name = this.hooks.profileName?.(node.profileId) ?? null;
-            const where = name ?? (node.profileId ? node.profileId : 'same as the chat');
-            const actual = node.type === NODE_TYPES.GENERATE ? (this.hooks.effectiveModel?.(node) ?? node.model) : node.model;
-            model.innerHTML = actual
-                ? `<i class="fa-solid fa-microchip"></i> ${esc(where)} \u00b7 <b>${esc(actual)}</b>`
-                : `<i class="fa-solid fa-microchip"></i> ${esc(where)}`;
-            model.title = node.model ? 'This block\u2019s own model.' : node.profileId ? 'The model this connection profile uses.' : 'Follows whatever model the chat is using right now.';
-            if (node.type === NODE_TYPES.GENERATE && this.hooks.onModelClick) {
-                model.classList.add('pc-node-model-pick');
-                model.insertAdjacentHTML('beforeend', ' <i class="fa-solid fa-caret-down pc-model-caret"></i>');
-                model.title += ' Click to choose another.';
-                model.addEventListener('mousedown', e => e.stopPropagation());
-                model.addEventListener('dblclick', e => e.stopPropagation());
-                model.addEventListener('click', (e) => { e.stopPropagation(); this.hooks.onModelClick(node, model); });
-            }
-            el.append(model);
-        }
-
-        if (node.type === NODE_TYPES.GENERATE && node.forward === 'all') {
-            const pass = document.createElement('div');
-            pass.className = 'pc-node-repeat';
-            pass.innerHTML = '<i class="fa-solid fa-angles-down"></i> passes on its inputs and its answer';
-            pass.title = 'What is wired into this block goes on down the canvas too, not only the answer.';
-            el.append(pass);
-        }
-                if (node.type === NODE_TYPES.GENERATE && Number(node.repeat) > 1) {
-            const rep = document.createElement('div');
-            rep.className = 'pc-node-repeat';
-            rep.innerHTML = `<i class="fa-solid fa-repeat"></i> up to ${Math.min(10, Math.round(node.repeat))} passes${node.repeatStopWhenSame !== false ? ', stops when nothing changes' : ''}`;
-            el.append(rep);
-        }
-
-        if (node.type === NODE_TYPES.GENERATE) {
-            const wave = this.hooks.waveInfo?.(node);
-            if (wave && wave.total > 1) {
-                const tag = document.createElement('div');
-                tag.className = `pc-node-wave${wave.willRunTogether ? '' : ' pc-node-wave-off'}`;
-                if (!wave.siblings.length) {
-                    tag.innerHTML = `<i class="fa-solid fa-arrow-down-1-9"></i> wave ${wave.wave} of ${wave.waves} \u00b7 waits for the wave before`;
-                    tag.title = 'This waits, because a Generate block upstream feeds it.';
-                } else if (wave.willRunTogether) {
-                    tag.innerHTML = `<i class="fa-solid fa-bolt"></i> ${wave.tied ? 'tied to' : 'at the same time as'} ${esc(wave.siblings.join(', '))}`;
-                    tag.title = wave.tied
-                        ? 'You tied these, so they go out together whatever the setting says.'
-                        : 'These go out together because nothing wires one into another.';
-                } else {
-                    tag.innerHTML = `<i class="fa-solid fa-bolt-slash"></i> could go out with ${esc(wave.siblings.join(', '))} \u2014 sending one at a time`;
-                    tag.title = 'Parallel sending is switched off. Tie these blocks, or switch it on in the status bar.';
-                }
-                el.append(tag);
-            }
-        }
-
-        const copies = this.hooks.copiesOf?.(node) ?? 1;
-        if (copies > 1) {
-            const dup = document.createElement('div');
-            dup.className = 'pc-node-dup';
-            dup.innerHTML = `<i class="fa-solid fa-clone"></i> sent ${copies}\u00d7 \u2014 reaches Output down ${copies} paths`;
-            dup.title = 'This block\u2019s text lands in the prompt more than once. Usually a wiring surprise rather than something you wanted.';
-            el.append(dup);
-        }
-
-        if (node.type === NODE_TYPES.ST && node.override?.content !== undefined) {
-            const badge = document.createElement('div');
-            badge.className = 'pc-node-cond pc-node-override';
-            badge.innerHTML = '<i class="fa-solid fa-pen"></i> edited on this canvas';
-            el.append(badge);
-        }
-
-        if (hasPorts(node)) {
-            const keys = outPorts(node);
-            const chosen = this.trace?.get(node.id)?.decision ?? null;
-            keys.forEach((k, i) => {
-                const port = document.createElement('div');
-                port.className = `pc-port pc-port-out pc-port-key${took(chosen, k.id) ? ' pc-port-chosen' : ''}${k === node.fallback ? ' pc-port-fallback' : ''}${k.stage ? ' pc-port-stage' : ''}`;
-                port.dataset.node = node.id;
-                port.dataset.dir = 'out';
-                port.dataset.port = k.id;
-                port.style.left = `${100 * (i + 1) / (keys.length + 1)}%`;
-                const valueName = k.stage ? (node.values ?? []).find(v => v.id === k.valueId)?.name || 'the value' : '';
-                port.title = k.stage ? `Stage "${k.name}": drag onto a block to switch it on while ${valueName} is in this stage`
-                    : node.type === NODE_TYPES.STATE ? `Drag to send "${k.name}"` : `Drag to wire the "${k.name}" path`;
-                const tag = document.createElement('span');
-                tag.className = 'pc-port-keyname';
-                tag.textContent = k.name || 'key';
-                port.append(tag);
-                el.append(port);
-            });
-        }
-
-        if (node.type !== NODE_TYPES.NOTE) {
-            if (node.type !== NODE_TYPES.OUTPUT && !hasPorts(node)) {
-                const outPort = document.createElement('div');
-                outPort.className = 'pc-port pc-port-out';
-                outPort.dataset.node = node.id;
-                outPort.dataset.dir = 'out';
-                outPort.title = node.type === NODE_TYPES.GENERATE
-                    ? 'The model\u2019s reply leaves from here. It does not go back into this block.'
-                    : 'Drag to wire this block into another';
-                el.append(outPort);
-
-                // The whole bottom edge is a handle too, so starting a wire
-                // does not mean hunting for a 13px dot.
-                const strip = document.createElement('div');
-                strip.className = 'pc-port pc-port-strip';
-                strip.dataset.node = node.id;
-                strip.dataset.dir = 'out';
-                strip.title = 'Drag from the bottom edge to wire this block into another';
-                el.append(strip);
-            }
-            const inPort = document.createElement('div');
-            inPort.className = 'pc-port pc-port-in';
-            inPort.dataset.node = node.id;
-            inPort.dataset.dir = 'in';
-            inPort.title = node.type === NODE_TYPES.GENERATE
-                ? 'Everything wired in here is the question sent to the model'
-                : 'What comes in here is read before this block\u2019s own text';
-            el.append(inPort);
-
-            // Generate blocks get a third port on the side. Nothing flows
-            // through it: dragging it to another Generate block says "send
-            // these two at the same time".
-            if (node.type === NODE_TYPES.GENERATE) {
-                for (const side of ['right', 'left']) {
-                    const tiePort = document.createElement('div');
-                    tiePort.className = `pc-port pc-port-tie pc-port-tie-${side}`;
-                    tiePort.dataset.node = node.id;
-                    tiePort.dataset.dir = 'tie';
-                    tiePort.dataset.side = side;
-                    tiePort.title = 'Drag to another Generate block to send them at the same time';
-                    tiePort.innerHTML = '<i class="fa-solid fa-bolt"></i>';
-                    el.append(tiePort);
-                }
-            }
-        }
-
-        return el;
-    }
-
-    #conditionLabel(c) {
-        return c.mode === 'probability' ? ruleLabel(c) : `if ${ruleLabel(c)}`;
-    }
 
     #preview(node) {
         switch (node.type) {
@@ -1232,18 +798,8 @@ export class Canvas {
         });
     }
 
-    #keyRow(k, rule, chosen, fallback = false) {
-        const row = document.createElement('div');
-        row.className = `pc-dec-key${chosen ? ' pc-dec-chosen' : ''}${fallback ? ' pc-dec-fallback' : ''}`;
-        const name = document.createElement('b');
-        name.textContent = k.name || 'key';
-        const why = document.createElement('span');
-        why.textContent = rule;
-        row.append(name, why);
-        return row;
-    }
 
-    /** Port centre in graph coordinates. A Decider has one out port per key. */
+
     #portPos(nodeId, dir, portId = null) {
         const node = this.graph.nodes[nodeId];
         if (!node) return { x: 0, y: 0 };
@@ -1331,136 +887,44 @@ export class Canvas {
     #drawWires(changedNodes = null) {
         if (!this.graph) return;
         const affected = changedNodes ? new Set([...changedNodes].flatMap(id => [...(this.incident.get(id) ?? [])])) : null;
-        const visible = new Set();
-
-        const bounds = { w: 4000, h: 4000 };
-        for (const n of Object.values(this.graph.nodes)) {
-            bounds.w = Math.max(bounds.w, n.x + 800);
-            bounds.h = Math.max(bounds.h, n.y + 800);
-        }
-        this.svg.setAttribute('viewBox', `0 0 ${bounds.w} ${bounds.h}`);
-        this.svg.setAttribute('width', bounds.w);
-        this.svg.setAttribute('height', bounds.h);
-        // An arrowhead for loop wires, so it is clear which way they run.
-        if (!this.svg.querySelector('defs')) this.svg.insertAdjacentHTML('beforeend', `<defs><marker id="pc-loop-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="pc-loop-arrow"/></marker></defs>`);
-
+        const visible = new Set(), bounds = { w: 4000, h: 4000 };
+        for (const n of Object.values(this.graph.nodes)) { bounds.w = Math.max(bounds.w, n.x + 800); bounds.h = Math.max(bounds.h, n.y + 800); }
         for (const wire of Object.values(this.graph.wires)) {
-            // Inside a folded group, wires are out of sight.
             const fa = this.#folded(this.graph.nodes[wire.from]), fb = this.#folded(this.graph.nodes[wire.to]);
             if (fa && fa === fb) continue;
-            visible.add(wire.id);
-            if (affected && !affected.has(wire.id)) continue;
+            visible.add(wire.id); if (affected && !affected.has(wire.id)) continue;
             const tie = wire.kind === WIRE_KINDS.TOGETHER;
-
-            // A tie joins two blocks side by side, because nothing flows along
-            // it. Drawing it bottom-to-top like a data wire would be a lie.
-            const left = tie && this.graph.nodes[wire.from] && this.graph.nodes[wire.to]
-                && this.graph.nodes[wire.from].x <= this.graph.nodes[wire.to].x;
-            const from = tie
-                ? this.#sidePos(left ? wire.from : wire.to, 'right')
-                : this.#portPos(wire.from, 'out', wire.port ?? null);
-            const to = tie
-                ? this.#sidePos(left ? wire.to : wire.from, 'left')
-                : this.#portPos(wire.to, 'in');
-            // A save back up the canvas goes round the side, like a loop, so it
-            // does not lie on top of the wire that comes down.
+            const left = tie && this.graph.nodes[wire.from] && this.graph.nodes[wire.to] && this.graph.nodes[wire.from].x <= this.graph.nodes[wire.to].x;
+            const from = tie ? this.#sidePos(left ? wire.from : wire.to, 'right') : this.#portPos(wire.from, 'out', wire.port ?? null);
+            const to = tie ? this.#sidePos(left ? wire.to : wire.from, 'left') : this.#portPos(wire.to, 'in');
             const back = wire.loop || (wire.kind === WIRE_KINDS.SAVE && to.y < from.y + 20);
             const d = tie ? this.#tiePath(from, to) : back ? this.#loopPath(from, to, wire) : this.#path(from, to);
-
-            const existing = this.wireElements.get(wire.id);
-            const hit = existing?.hit ?? document.createElementNS(SVG_NS, 'path');
-            hit.setAttribute('d', d);
-            hit.setAttribute('class', 'pc-wire-hit');
-            hit.dataset.id = wire.id;
-
-            const path = existing?.path ?? document.createElementNS(SVG_NS, 'path');
-            path.removeAttribute('marker-end');
-            path.setAttribute('d', d);
-            path.dataset.id = wire.id;
-            const srcNode = this.graph.nodes[wire.from];
-            const isKey = hasPorts(srcNode);
-            const chosen = isKey ? this.trace?.get(wire.from)?.decision : undefined;
+            const src = this.graph.nodes[wire.from], isKey = hasPorts(src), chosen = isKey ? this.trace?.get(wire.from)?.decision : undefined;
             const untaken = isKey && chosen !== undefined && chosen !== null && !took(chosen, wire.port);
-            const offWire = [wire.from, wire.to].some(id => this.graph.nodes[id]?.enabled === false || inOffGroup(this.graph, this.graph.nodes[id]));
+            const off = [wire.from, wire.to].some(id => this.graph.nodes[id]?.enabled === false || inOffGroup(this.graph, this.graph.nodes[id]));
             const mode = !tie && (wire.mode === 'activate' || wire.mode === 'result') ? wire.mode : null;
-            path.setAttribute('class', `pc-wire pc-wire-${wire.kind}${mode ? ` pc-wire-mode-${mode}` : ''}${wire.loop ? ' pc-wire-loop' : ''}${isKey ? ' pc-wire-key' : ''}${untaken ? ' pc-wire-untaken' : ''}${offWire ? ' pc-wire-off' : ''}${this.selection?.kind === 'wire' && this.selection.id === wire.id ? ' pc-selected' : ''}`);
-
-            const label = existing?.label ?? document.createElementNS(SVG_NS, 'text');
-            label.removeAttribute('text-anchor');
-            delete label.dataset.id;
-            label.setAttribute('class', 'pc-wire-label');
+            let className = 'pc-wire pc-wire-' + wire.kind + (mode ? ' pc-wire-mode-' + mode : '') + (wire.loop ? ' pc-wire-loop' : '') + (isKey ? ' pc-wire-key' : '') + (untaken ? ' pc-wire-untaken' : '') + (off ? ' pc-wire-off' : '') + (this.selection?.kind === 'wire' && this.selection.id === wire.id ? ' pc-selected' : '');
             const side = back ? this.#loopSide(from, to, wire) : null;
-            label.setAttribute('x', side ? side.x + 10 : (from.x + to.x) / 2);
-            label.setAttribute('y', side ? side.y + 4 : (from.y + to.y) / 2);
-            const keyName = isKey ? (outPorts(srcNode).find(k => k.id === wire.port)?.name ?? 'key') : null;
-            label.textContent = tie ? TOGETHER_LABEL
-                : wire.loop ? `\u21ba ${keyName ? keyName + ' \u00b7 ' : ''}${wire.loop.max ?? 3}\u00d7 max`
-                // The output's name is already on its dot, so a mode wire just says what it does.
-                : wire.kind === WIRE_KINDS.SAVE ? `\u2913 save${keyName ? ` ${keyName}` : ''}${{ append: ' (add)', keep: ' (add, keep last)' }[this.graph.nodes[wire.to]?.saveMode] ?? ''}`
-                : mode === 'activate' ? '\u26a1 activate'
-                : mode === 'result' ? `\u2192 ${srcNode?.type === NODE_TYPES.LOREBOOK ? 'entry names' : wire.result === 'matched' ? 'matched words' : 'result'}`
-                : keyName ?? (WIRE_LABEL[wire.kind] ?? wire.kind);
-            if (back && !wire.loop) { label.setAttribute('text-anchor', 'start'); path.setAttribute('marker-end', 'url(#pc-loop-arrow)'); }
-            if (wire.loop) {
-                label.classList.add('pc-wire-label-loop');
-                label.dataset.id = wire.id;
-                label.setAttribute('text-anchor', 'start');
-                const tip = document.createElementNS(SVG_NS, 'title');
-                tip.textContent = 'Loop: runs this section again, at most this many times. Click to change.';
-                label.append(tip);
-                path.setAttribute('marker-end', 'url(#pc-loop-arrow)');
-            }
-            if (!tie && !wire.loop && wire.condition && wire.condition.mode !== 'always') {
-                label.textContent += ` \u00b7 if ${ruleLabel(wire.condition)}`;
-                label.classList.add('pc-wire-label-filter');
-                path.classList.add('pc-wire-conditional');
-            }
+            const key = isKey ? (outPorts(src).find(k => k.id === wire.port)?.name ?? 'key') : null;
+            let text = tie ? TOGETHER_LABEL : wire.loop ? '↺ ' + (key ? key + ' · ' : '') + (wire.loop.max ?? 3) + '× max' : wire.kind === WIRE_KINDS.SAVE ? '⤓ save' + (key ? ' ' + key : '') + ({ append: ' (add)', keep: ' (add, keep last)' }[this.graph.nodes[wire.to]?.saveMode] ?? '') : mode === 'activate' ? '⚡ activate' : mode === 'result' ? '→ ' + (src?.type === NODE_TYPES.LOREBOOK ? 'entry names' : wire.result === 'matched' ? 'matched words' : 'result') : key ?? (WIRE_LABEL[wire.kind] ?? wire.kind);
+            let labelClass = 'pc-wire-label' + (wire.loop ? ' pc-wire-label-loop' : '');
+            if (!tie && !wire.loop && wire.condition && wire.condition.mode !== 'always') { text += ' · if ' + ruleLabel(wire.condition); labelClass += ' pc-wire-label-filter'; className += ' pc-wire-conditional'; }
             const filter = !tie && !wire.loop && !mode ? selectLabel(wire.select) : '';
-            if (filter) {
-                // The filter is the thing you most need to see: what actually crosses.
-                label.textContent += ` \u00b7 ${filter}`;
-                label.classList.add('pc-wire-label-filter');
-            }
-
-            if (!existing) { this.svg.append(hit, path, label); this.wireElements.set(wire.id, { hit, path, label }); }
+            if (filter) { text += ' · ' + filter; if (!labelClass.includes('pc-wire-label-filter')) labelClass += ' pc-wire-label-filter'; }
+            this.wireViews.set(wire.id, { id: wire.id, d, className, arrow: !!back, label: { x: side ? side.x + 10 : (from.x + to.x) / 2, y: side ? side.y + 4 : (from.y + to.y) / 2, text, className: labelClass, anchor: back ? 'start' : undefined, id: wire.loop ? wire.id : undefined, title: wire.loop ? 'Loop: runs this section again, at most this many times. Click to change.' : undefined } });
         }
-
-        if (!affected) for (const [id, elements] of this.wireElements) if (!visible.has(id)) {
-            elements.hit.remove(); elements.path.remove(); elements.label.remove(); this.wireElements.delete(id);
-        }
-
-        if (this.linking?.ghost) {
-            const tie = this.linking.dir === 'tie';
-            const ghost = this.svg.querySelector('.pc-wire-ghost') ?? document.createElementNS(SVG_NS, 'path');
-            ghost.setAttribute('d', tie
-                ? this.#tiePath(this.linking.from, this.linking.ghost)
-                : this.#path(this.linking.from, this.linking.ghost));
-            ghost.setAttribute('class', `pc-wire pc-wire-ghost${tie ? ' pc-wire-ghost-tie' : ''}`);
-            this.svg.append(ghost);
-        } else this.svg.querySelector('.pc-wire-ghost')?.remove();
+        if (!affected) for (const id of this.wireViews.keys()) if (!visible.has(id)) this.wireViews.delete(id);
+        const ghost = this.linking?.ghost ? { d: this.linking.dir === 'tie' ? this.#tiePath(this.linking.from, this.linking.ghost) : this.#path(this.linking.from, this.linking.ghost), className: 'pc-wire pc-wire-ghost' + (this.linking.dir === 'tie' ? ' pc-wire-ghost-tie' : '') } : null;
+        this.layer.setWires([...this.wireViews.values()], bounds, ghost);
     }
-
-    /* -------------------------------------------------------------- */
-    /* interaction                                                     */
-    /* -------------------------------------------------------------- */
 
     #renderDrag() {
         const d = this.drag; if (!d) return;
         const ids = d.id ? [d.id] : (d.starts ?? d.several ?? []).map(([id]) => id);
-        for (const id of ids) {
-            const n = this.graph.nodes[id], el = this.nodeElements.get(id);
-            if (n && el) { el.style.left = `${n.x}px`; el.style.top = `${n.y}px`; }
-        }
+        const nodes = ids.map(id => this.graph.nodes[id]).filter(Boolean).map(n => ({ id: n.id, x: n.x, y: n.y }));
         const gids = new Set([d.group, d.resize, ...(d.groups ?? []).map(g => g.id)].filter(Boolean));
-        for (const gid of gids) {
-            const g = this.graph.groups?.[gid]; if (!g) continue;
-            const card = this.nodeElements.get(`group:${gid}`);
-            if (card) { card.style.left = `${g.x}px`; card.style.top = `${g.y}px`; }
-            if (g.frame) {
-                const frame = this.nodeLayer.querySelector(`.pc-group-frame[data-group="${CSS.escape(gid)}"]`);
-                if (frame) Object.assign(frame.style, { left: `${g.frame.x}px`, top: `${g.frame.y}px`, width: `${g.frame.w}px`, height: `${g.frame.h}px` });
-            }
-        }
+        const groups = [...gids].map(id => this.graph.groups?.[id]).filter(Boolean).map(g => ({ id: g.id, x: g.collapsed ? g.x : g.frame?.x ?? g.x, y: g.collapsed ? g.y : g.frame?.y ?? g.y, w: g.collapsed ? g.w || 260 : g.frame?.w, h: g.frame?.h }));
+        this.layer.setPositions(nodes, groups);
         this.#drawWires(new Set(ids));
         if (!d.group) this.#hoverBlanket(ids);
         this.#applyFocus();
@@ -1509,6 +973,7 @@ export class Canvas {
 
         host.addEventListener('mousedown', (e) => {
             if (!this.graph) return;
+            if (e.target.closest('.pc-node-action')) return;
             if (typing(e)) return;
             this.gestureRect = host.getBoundingClientRect();
             if (e.button === 1 || (e.button === 0 && (this.spaceDown || this.mode === 'pan'))) {

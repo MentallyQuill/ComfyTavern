@@ -9,7 +9,7 @@ let total = 0;
 for (const file of files) {
     if (requested.length && !requested.some(part => file.includes(part))) continue;
     total++;
-    const result = spawnSync(process.execPath, [`tests/${file}`], { cwd: root, encoding: 'utf8' });
+    const result = spawnSync(process.execPath, ['--import', './tools/node-test-host.mjs', `tests/${file}`], { cwd: root, encoding: 'utf8' });
     if (result.status === 0) console.log(`PASS ${file}`);
     else {
         failed++;
