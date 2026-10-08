@@ -19,6 +19,7 @@ import { selectLabel } from './select.js?v=0.17.0';
 import { graphPoint, zoomAt, wheelFactor } from './canvas/camera.js?v=0.17.0';
 import { createFrameScheduler } from './canvas/frame.js?v=0.17.0';
 import { selectionMode, rectangle, intersects, combineSelection } from './canvas/selection.js?v=0.17.0';
+import { createGeometryCache, indexIncidentWires } from './canvas/geometry.js?v=0.17.0';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -135,6 +136,10 @@ export class Canvas {
         this.tokensKey = '';
         this.mode = 'select';
         this.spaceDown = false;
+        this.geometry = createGeometryCache();
+        this.nodeElements = new Map();
+        this.incident = new Map();
+        this.wireElements = new Map();
 
         host.classList.add('pc-canvas');
         host.tabIndex = 0;
@@ -154,7 +159,21 @@ export class Canvas {
         this.viewport.append(this.svg, this.nodeLayer);
         host.append(this.viewport);
 
-        this.frames = createFrameScheduler(() => this.applyTransform());
+        this.frames = createFrameScheduler(flags => {
+            if (flags & 1) this.applyTransform();
+            if (flags & 2) this.#drawWires();
+            if (flags & 4) this.#renderDrag();
+        });
+        const Resize = globalThis.ResizeObserver ?? window.ResizeObserver;
+        if (Resize) this.resizeObserver = new Resize(entries => {
+            let changed = false;
+            for (const entry of entries) {
+                const id = entry.target.dataset.id ?? `group:${entry.target.dataset.group}`;
+                const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.target.offsetHeight;
+                changed = this.geometry.update(id, height) || changed;
+            }
+            if (changed && this.graph) this.frames.schedule(2);
+        });
 
         this.#bind();
     }
@@ -171,7 +190,7 @@ export class Canvas {
     setGraph(graph) {
         if (!graph) return;
         this.cancelGesture();
-        if (graph !== this.graph) { this.tokens = null; this.tokensKey = ''; }
+        if (graph !== this.graph) { this.tokens = null; this.tokensKey = ''; this.geometry.clear(); }
         this.graph = graph;
         this.selection = null;
         this.multi.clear();
@@ -251,7 +270,7 @@ export class Canvas {
 
     /** Screen coordinates to graph coordinates. */
     toGraph(clientX, clientY) {
-        const rect = this.host.getBoundingClientRect();
+        const rect = this.gestureRect ?? this.host.getBoundingClientRect();
         return graphPoint(this.view, { x: clientX - rect.left, y: clientY - rect.top });
     }
 
@@ -262,9 +281,9 @@ export class Canvas {
     }
 
     fit() {
-        const boxes = Object.values(this.graph?.nodes ?? {}).filter(n => !this.#folded(n)).map(n => ({ x: n.x, y: n.y, w: n.w || 260, h: 160 }));
+        const boxes = Object.values(this.graph?.nodes ?? {}).filter(n => !this.#folded(n)).map(n => ({ x: n.x, y: n.y, w: n.w || 260, h: this.heightOf(n) || 160 }));
         for (const g of Object.values(this.graph?.groups ?? {})) {
-            if (g.collapsed) boxes.push({ x: g.x, y: g.y, w: g.w || 260, h: 160 });
+            if (g.collapsed) boxes.push({ x: g.x, y: g.y, w: g.w || 260, h: this.geometry.get(`group:${g.id}`, 160) || 160 });
             else if (g.frame) boxes.push(g.frame);
         }
         if (!boxes.length) return;
@@ -288,6 +307,8 @@ export class Canvas {
 
     render() {
         if (!this.graph) return;
+        this.hooks.prepareRender?.();
+        this.incident = indexIncidentWires(Object.values(this.graph.wires));
         this.applyTransform();
         this.#drawNodes();
         this.#drawWires();
@@ -384,6 +405,7 @@ export class Canvas {
         for (const g of Object.values(groups)) if (g.collapsed) frag.append(this.#groupElement(g));
         this.nodeLayer.innerHTML = '';
         this.nodeLayer.append(frag);
+        this.#measureNodes();
         // Open groups get a frame drawn around their blocks, behind them,
         // once the blocks are on the page and their heights are known.
         for (const g of Object.values(groups)) if (!g.collapsed) this.#groupFrame(g);
@@ -391,6 +413,18 @@ export class Canvas {
     }
 
     /** The folded group a block is hidden in, if any. */
+    #measureNodes() {
+        this.resizeObserver?.disconnect();
+        this.nodeElements.clear();
+        for (const el of this.nodeLayer.querySelectorAll('.pc-node')) {
+            const id = el.dataset.id ?? `group:${el.dataset.group}`;
+            this.nodeElements.set(id, el);
+            this.geometry.update(id, el.offsetHeight);
+            this.resizeObserver?.observe(el);
+        }
+        this.geometry.retain(this.nodeElements.keys());
+    }
+
     #folded(node) {
         const g = groupOf(this.graph, node);
         return g?.collapsed ? g : null;
@@ -473,8 +507,7 @@ export class Canvas {
 
     /** Height of a block on screen, for deciding what rests where. */
     heightOf(node) {
-        const el = this.#nodeEl(node?.id);
-        return el ? el.offsetHeight : 90;
+        return this.geometry.get(node?.id);
     }
 
     /**
@@ -647,8 +680,7 @@ export class Canvas {
             const g = this.#folded(n);
             if (g) {
                 if (groups.has(g.id)) continue; groups.add(g.id);
-                const el = this.nodeLayer.querySelector(`.pc-node-group[data-group="${CSS.escape(g.id)}"]`);
-                boxes.push({ x: g.x, y: g.y, w: g.w || 260, h: el?.offsetHeight || 80 });
+                boxes.push({ x: g.x, y: g.y, w: g.w || 260, h: this.geometry.get(`group:${g.id}`, 80) });
             } else boxes.push({ x: n.x, y: n.y, w: n.w || 260, h: this.heightOf(n) || 90 });
         }
         if (!boxes.length) return;
@@ -664,6 +696,7 @@ export class Canvas {
     cancelGesture() {
         const active = !!(this.drag || this.marquee || this.pan || this.linking);
         this.frames.cancel(); clearTimeout(this.wheelTimer);
+        this.gestureRect = null; this.wheelRect = null;
         const d = this.drag;
         if (d && this.graph) {
             for (const [id, x, y] of d.starts ?? d.several ?? []) {
@@ -711,8 +744,7 @@ export class Canvas {
         }
         for (const g of Object.values(this.graph.groups ?? {})) {
             if (!g.collapsed) continue;
-            const el = this.nodeLayer.querySelector(`.pc-node-group[data-group="${CSS.escape(g.id)}"]`);
-            if (intersects(r, { x: g.x, y: g.y, w: g.w || 260, h: el?.offsetHeight || 80 })) hits.push(...groupMembers(this.graph, g.id).map(n => n.id));
+            if (intersects(r, { x: g.x, y: g.y, w: g.w || 260, h: this.geometry.get(`group:${g.id}`, 80) })) hits.push(...groupMembers(this.graph, g.id).map(n => n.id));
         }
         this.setMulti([...combineSelection(m.initial, hits, m.mode)]);
     }
@@ -1104,7 +1136,7 @@ export class Canvas {
     }
 
     #nodeEl(id) {
-        return id ? this.nodeLayer.querySelector(`.pc-node[data-id="${CSS.escape(id)}"]`) : null;
+        return this.nodeElements.get(id) ?? null;
     }
 
     /**
@@ -1152,8 +1184,7 @@ export class Canvas {
 
     /** A folded group's top (in) or bottom (out) dot, in graph coordinates. */
     #groupPortPos(g, dir) {
-        const gel = this.nodeLayer.querySelector(`.pc-node-group[data-group="${CSS.escape(g.id)}"]`);
-        const gh = gel ? gel.offsetHeight : 80;
+        const gh = this.geometry.get(`group:${g.id}`, 80);
         const gw = g.w || 260;
         return dir === 'out' ? { x: g.x + gw / 2, y: g.y + gh } : { x: g.x + gw / 2, y: g.y };
     }
@@ -1214,18 +1245,16 @@ export class Canvas {
 
     /** Port centre in graph coordinates. A Decider has one out port per key. */
     #portPos(nodeId, dir, portId = null) {
-        const el = this.nodeLayer.querySelector(`.pc-node[data-id="${CSS.escape(nodeId)}"]`);
         const node = this.graph.nodes[nodeId];
         if (!node) return { x: 0, y: 0 };
         const fold = this.#folded(node);
         if (fold) {
-            const gel = this.nodeLayer.querySelector(`.pc-node-group[data-group="${CSS.escape(fold.id)}"]`);
-            const gh = gel ? gel.offsetHeight : 80;
+            const gh = this.geometry.get(`group:${fold.id}`, 80);
             const gw = fold.w || 260;
             return dir === 'out' ? { x: fold.x + gw / 2, y: fold.y + gh } : { x: fold.x + gw / 2, y: fold.y };
         }
         const w = node.w || 260;
-        const h = el ? el.offsetHeight : 90;
+        const h = this.geometry.get(nodeId);
         if (dir === 'out' && hasPorts(node)) {
             const keys = outPorts(node);
             const i = Math.max(0, keys.findIndex(k => k.id === portId));
@@ -1250,13 +1279,12 @@ export class Canvas {
 
     /** Middle of a node's left or right edge, in graph coordinates. */
     #sidePos(nodeId, side) {
-        const el = this.nodeLayer.querySelector(`.pc-node[data-id="${CSS.escape(nodeId)}"]`);
         const node = this.graph.nodes[nodeId];
         if (!node) return { x: 0, y: 0 };
         const fold = this.#folded(node);
         if (fold) return { x: side === 'right' ? fold.x + (fold.w || 260) : fold.x, y: fold.y + 30 };
         const w = node.w || 260;
-        const h = el ? el.offsetHeight : 90;
+        const h = this.geometry.get(nodeId);
         return { x: side === 'right' ? node.x + w : node.x, y: node.y + h / 2 };
     }
 
@@ -1300,9 +1328,10 @@ export class Canvas {
         return `M ${from.x} ${from.y} C ${from.x} ${from.y + dy}, ${to.x} ${to.y - dy}, ${to.x} ${to.y}`;
     }
 
-    #drawWires() {
+    #drawWires(changedNodes = null) {
         if (!this.graph) return;
-        this.svg.innerHTML = '';
+        const affected = changedNodes ? new Set([...changedNodes].flatMap(id => [...(this.incident.get(id) ?? [])])) : null;
+        const visible = new Set();
 
         const bounds = { w: 4000, h: 4000 };
         for (const n of Object.values(this.graph.nodes)) {
@@ -1313,12 +1342,14 @@ export class Canvas {
         this.svg.setAttribute('width', bounds.w);
         this.svg.setAttribute('height', bounds.h);
         // An arrowhead for loop wires, so it is clear which way they run.
-        this.svg.insertAdjacentHTML('beforeend', `<defs><marker id="pc-loop-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="pc-loop-arrow"/></marker></defs>`);
+        if (!this.svg.querySelector('defs')) this.svg.insertAdjacentHTML('beforeend', `<defs><marker id="pc-loop-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="pc-loop-arrow"/></marker></defs>`);
 
         for (const wire of Object.values(this.graph.wires)) {
             // Inside a folded group, wires are out of sight.
             const fa = this.#folded(this.graph.nodes[wire.from]), fb = this.#folded(this.graph.nodes[wire.to]);
             if (fa && fa === fb) continue;
+            visible.add(wire.id);
+            if (affected && !affected.has(wire.id)) continue;
             const tie = wire.kind === WIRE_KINDS.TOGETHER;
 
             // A tie joins two blocks side by side, because nothing flows along
@@ -1336,12 +1367,14 @@ export class Canvas {
             const back = wire.loop || (wire.kind === WIRE_KINDS.SAVE && to.y < from.y + 20);
             const d = tie ? this.#tiePath(from, to) : back ? this.#loopPath(from, to, wire) : this.#path(from, to);
 
-            const hit = document.createElementNS(SVG_NS, 'path');
+            const existing = this.wireElements.get(wire.id);
+            const hit = existing?.hit ?? document.createElementNS(SVG_NS, 'path');
             hit.setAttribute('d', d);
             hit.setAttribute('class', 'pc-wire-hit');
             hit.dataset.id = wire.id;
 
-            const path = document.createElementNS(SVG_NS, 'path');
+            const path = existing?.path ?? document.createElementNS(SVG_NS, 'path');
+            path.removeAttribute('marker-end');
             path.setAttribute('d', d);
             path.dataset.id = wire.id;
             const srcNode = this.graph.nodes[wire.from];
@@ -1352,7 +1385,9 @@ export class Canvas {
             const mode = !tie && (wire.mode === 'activate' || wire.mode === 'result') ? wire.mode : null;
             path.setAttribute('class', `pc-wire pc-wire-${wire.kind}${mode ? ` pc-wire-mode-${mode}` : ''}${wire.loop ? ' pc-wire-loop' : ''}${isKey ? ' pc-wire-key' : ''}${untaken ? ' pc-wire-untaken' : ''}${offWire ? ' pc-wire-off' : ''}${this.selection?.kind === 'wire' && this.selection.id === wire.id ? ' pc-selected' : ''}`);
 
-            const label = document.createElementNS(SVG_NS, 'text');
+            const label = existing?.label ?? document.createElementNS(SVG_NS, 'text');
+            label.removeAttribute('text-anchor');
+            delete label.dataset.id;
             label.setAttribute('class', 'pc-wire-label');
             const side = back ? this.#loopSide(from, to, wire) : null;
             label.setAttribute('x', side ? side.x + 10 : (from.x + to.x) / 2);
@@ -1387,23 +1422,49 @@ export class Canvas {
                 label.classList.add('pc-wire-label-filter');
             }
 
-            this.svg.append(hit, path, label);
+            if (!existing) { this.svg.append(hit, path, label); this.wireElements.set(wire.id, { hit, path, label }); }
+        }
+
+        if (!affected) for (const [id, elements] of this.wireElements) if (!visible.has(id)) {
+            elements.hit.remove(); elements.path.remove(); elements.label.remove(); this.wireElements.delete(id);
         }
 
         if (this.linking?.ghost) {
             const tie = this.linking.dir === 'tie';
-            const ghost = document.createElementNS(SVG_NS, 'path');
+            const ghost = this.svg.querySelector('.pc-wire-ghost') ?? document.createElementNS(SVG_NS, 'path');
             ghost.setAttribute('d', tie
                 ? this.#tiePath(this.linking.from, this.linking.ghost)
                 : this.#path(this.linking.from, this.linking.ghost));
             ghost.setAttribute('class', `pc-wire pc-wire-ghost${tie ? ' pc-wire-ghost-tie' : ''}`);
             this.svg.append(ghost);
-        }
+        } else this.svg.querySelector('.pc-wire-ghost')?.remove();
     }
 
     /* -------------------------------------------------------------- */
     /* interaction                                                     */
     /* -------------------------------------------------------------- */
+
+    #renderDrag() {
+        const d = this.drag; if (!d) return;
+        const ids = d.id ? [d.id] : (d.starts ?? d.several ?? []).map(([id]) => id);
+        for (const id of ids) {
+            const n = this.graph.nodes[id], el = this.nodeElements.get(id);
+            if (n && el) { el.style.left = `${n.x}px`; el.style.top = `${n.y}px`; }
+        }
+        const gids = new Set([d.group, d.resize, ...(d.groups ?? []).map(g => g.id)].filter(Boolean));
+        for (const gid of gids) {
+            const g = this.graph.groups?.[gid]; if (!g) continue;
+            const card = this.nodeElements.get(`group:${gid}`);
+            if (card) { card.style.left = `${g.x}px`; card.style.top = `${g.y}px`; }
+            if (g.frame) {
+                const frame = this.nodeLayer.querySelector(`.pc-group-frame[data-group="${CSS.escape(gid)}"]`);
+                if (frame) Object.assign(frame.style, { left: `${g.frame.x}px`, top: `${g.frame.y}px`, width: `${g.frame.w}px`, height: `${g.frame.h}px` });
+            }
+        }
+        this.#drawWires(new Set(ids));
+        if (!d.group) this.#hoverBlanket(ids);
+        this.#applyFocus();
+    }
 
     #crossedDragThreshold(e) {
         return this.drag?.moved || Math.hypot(e.clientX - (this.gestureStart?.cx ?? e.clientX), e.clientY - (this.gestureStart?.cy ?? e.clientY)) >= 4;
@@ -1423,6 +1484,7 @@ export class Canvas {
             if (e.code === 'Space' || e.key === ' ') { this.spaceDown = false; host.classList.remove('pc-space-pan'); }
         });
         window.addEventListener('blur', () => this.cancelGesture());
+        window.addEventListener('resize', () => this.cancelGesture());
         host.addEventListener('pointercancel', () => this.cancelGesture());
 
         // Where the pointer is on the canvas, so a paste lands under it.
@@ -1430,9 +1492,9 @@ export class Canvas {
         host.addEventListener('mouseleave', () => { this.pointer = null; });
 
         host.addEventListener('wheel', (e) => {
-            if (!this.graph || this.drag || this.linking || this.marquee) return;
+            if (!this.graph || this.drag || this.linking || this.marquee || this.pan) return;
             e.preventDefault();
-            const rect = host.getBoundingClientRect();
+            const rect = this.wheelRect ??= host.getBoundingClientRect();
             const factor = wheelFactor(e.deltaY, e.deltaMode, rect.height);
             if (!zoomAt(this.view, factor, { x: e.clientX - rect.left, y: e.clientY - rect.top })) return;
             host.classList.add('pc-interacting');
@@ -1440,6 +1502,7 @@ export class Canvas {
             clearTimeout(this.wheelTimer);
             this.wheelTimer = setTimeout(() => {
                 this.frames.flush(); host.classList.remove('pc-interacting');
+                this.wheelRect = null;
                 if (this.graph) touchGraph(this.graph);
             }, 160);
         }, { passive: false });
@@ -1447,6 +1510,7 @@ export class Canvas {
         host.addEventListener('mousedown', (e) => {
             if (!this.graph) return;
             if (typing(e)) return;
+            this.gestureRect = host.getBoundingClientRect();
             if (e.button === 1 || (e.button === 0 && (this.spaceDown || this.mode === 'pan'))) {
                 e.preventDefault();
                 this.gestureStart = { selection: this.selection && { ...this.selection }, multi: [...this.multi] };
@@ -1594,7 +1658,7 @@ export class Canvas {
         window.addEventListener('mousemove', (e) => {
             if (this.linking) {
                 this.linking.ghost = this.toGraph(e.clientX, e.clientY);
-                this.#drawWires();
+                this.#drawWires(new Set());
                 // Light up the block the wire would land on, so you can see
                 // the drop will take before you let go.
                 const target = this.#linkTarget(e);
@@ -1620,8 +1684,7 @@ export class Canvas {
                 d.moved = true;
                 g.frame.w = Math.max(GROUP_MIN.w, Math.round(d.w + p.x - d.sx));
                 g.frame.h = Math.max(GROUP_MIN.h, Math.round(d.h + p.y - d.sy));
-                const fr = this.nodeLayer.querySelector(`.pc-group-frame[data-group="${CSS.escape(g.id)}"]`);
-                if (fr) { fr.style.width = `${g.frame.w}px`; fr.style.height = `${g.frame.h}px`; }
+                this.frames.schedule(4);
                 return;
             }
             if (this.drag?.group || this.drag?.several) {
@@ -1647,8 +1710,8 @@ export class Canvas {
                         if (g.frame && d.fx !== undefined) { g.frame.x = d.fx + dx; g.frame.y = d.fy + dy; }
                     }
                 }
-                this.#drawNodes();
-                this.#drawWires();
+                this.host.classList.add('pc-interacting');
+                this.frames.schedule(4);
                 if (!d.group) this.#hoverBlanket(d.several.map(([id]) => id));
                 return;
             }
@@ -1661,9 +1724,8 @@ export class Canvas {
                 node.y = Math.round(p.y - this.drag.dy);
                 if (!this.drag.moved) this.hooks.onDragBlock?.(true);
                 this.drag.moved = true;
-                const el = this.nodeLayer.querySelector(`.pc-node[data-id="${CSS.escape(node.id)}"]`);
-                if (el) { el.style.left = `${node.x}px`; el.style.top = `${node.y}px`; }
-                this.#drawWires();
+                this.host.classList.add('pc-interacting');
+                this.frames.schedule(4);
                 this.#hoverBlanket([node.id]);
 
                 // Dragging a block out over the library means "save it there":
@@ -1687,6 +1749,9 @@ export class Canvas {
         });
 
         window.addEventListener('mouseup', (e) => {
+            this.frames.flush();
+            this.gestureRect = null;
+            this.host.classList.remove('pc-interacting');
             if (this.linking) {
                 const targetId = this.#linkTarget(e);
                 const link = this.linking;

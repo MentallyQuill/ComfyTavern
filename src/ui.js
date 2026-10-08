@@ -31,12 +31,15 @@ import { run, profileName, effectiveModel, callCount, testBlock, shapeForApi, in
 import { Canvas, WIRE_LABEL, TYPE_LABEL, TYPE_ICON } from './canvas.js?v=0.17.0';
 import { modelCombo } from './model-combo.js?v=0.17.0';
 import { jevReady } from './jev.js?v=0.17.0';
+import { createGraphAnalysis } from './ui/graph-analysis.js?v=0.17.0';
 
 let root = null;
 let canvas = null;
 let current = null;      // graph in view
 let selected = null;     // node or wire
 let selectedKind = null;
+const graphAnalysis = createGraphAnalysis({ counts: emissionCounts, levels: generateLevels, group: togetherGroup });
+let canvasAnalysis = graphAnalysis.prepare(null);
 
 export const el = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -102,26 +105,7 @@ async function refreshLive() {
  * precisely when nothing wires them together. This makes that visible.
  */
 function waveInfo(node) {
-    if (!current) return null;
-    const waves = generateLevels(current);
-    if (!waves.length) return null;
-    const total = waves.reduce((n, w) => n + w.length, 0);
-    for (const [i, wave] of waves.entries()) {
-        if (!wave.some(n => n.id === node.id)) continue;
-        const group = togetherGroup(current, node.id);
-        const tied = wave.some(n => n.id !== node.id && group.has(n.id));
-        const auto = true;
-        return {
-            wave: i + 1,
-            waves: waves.length,
-            total,
-            tied,
-            // A tie is explicit and outranks the global toggle.
-            willRunTogether: tied || auto,
-            siblings: wave.filter(n => n.id !== node.id).map(n => n.title),
-        };
-    }
-    return null;
+    return canvasAnalysis.waveById.get(node.id) ?? null;
 }
 
 /** What a SillyTavern block would put into the prompt right now. */
@@ -262,6 +246,7 @@ function build() {
     document.addEventListener('pc-theme', () => { if (canvas && isOpen()) canvas.render(); });
 
     canvas = new Canvas(canvasHost, {
+        prepareRender: () => { canvasAnalysis = graphAnalysis.prepare(current); },
         onSelect: (item, kind) => { selected = item; selectedKind = kind; renderInspector(); },
         onMulti: (ids) => {
             if (ids.length > 1) { selected = ids; selectedKind = 'multi'; renderInspector(); }
@@ -296,7 +281,7 @@ function build() {
         profileName,
         effectiveModel,
         waveInfo,
-        copiesOf: (node) => (current ? (emissionCounts(current).get(node.id) ?? 1) : 1),
+        copiesOf: (node) => canvasAnalysis.counts.get(node.id) ?? 1,
         onNodeOverFolder: highlightFolder,
         onDragBlock: showLibraryDropZone,
         onNodeDropOnFolder: saveNodeToFolder,
