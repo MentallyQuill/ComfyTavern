@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import { fixture, dom } from './canvas-fixture.mjs';
+const { host, canvas } = fixture();
+const card = host.querySelector('.pc-node');
+const path = host.querySelector('.pc-wire');
+const d = path.getAttribute('d');
+canvas.zoomBy(1.2, 200, 200);
+assert.equal(host.querySelector('.pc-node'), card, 'zoom preserves card identity');
+assert.equal(host.querySelector('.pc-wire'), path, 'zoom preserves wire identity');
+assert.equal(path.getAttribute('d'), d, 'camera movement leaves graph-space wire geometry untouched');
+let transforms = 0;
+const apply = canvas.applyTransform.bind(canvas);
+canvas.applyTransform = () => { transforms++; apply(); };
+for (let i = 0; i < 3; i++) host.dispatchEvent(new dom.window.WheelEvent('wheel', { deltaY: -1, clientX: 200, clientY: 200, bubbles: true, cancelable: true }));
+await new Promise(resolve => setTimeout(resolve, 25));
+assert.equal(transforms, 1, 'a burst of wheel input applies the final camera once per frame');
+console.log('canvas-performance: ok');

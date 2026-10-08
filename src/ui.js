@@ -157,6 +157,7 @@ export function open() {
 }
 
 export function close() {
+    canvas?.cancelGesture();
     closeStateWindow();
     root?.classList.remove('pc-open');
 }
@@ -313,16 +314,24 @@ function build() {
 
     document.addEventListener('keydown', (e) => {
         if (!isOpen()) return;
-        const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
-        if (e.key === 'Escape' && !typing) { close(); return; }
+        const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) || document.activeElement?.isContentEditable || e.target?.closest?.('[contenteditable="true"]');
+        if (e.key === 'Escape' && !typing) {
+            e.preventDefault();
+            if (canvas.cancelGesture()) return;
+            if (canvas.selection || canvas.multi.size) { canvas.setMulti([]); canvas.select(null); return; }
+            close(); return;
+        }
         // In a text box, Ctrl+Z undoes your typing as usual; on the canvas it
         // undoes the last change to the canvas.
         const mod = e.ctrlKey || e.metaKey;
         if (mod && !typing && !e.altKey) {
             const k = e.key.toLowerCase();
+            if (k === 'a') { e.preventDefault(); canvas.selectAll(); return; }
+            if (k === 'g') { e.preventDefault(); makeGroup([...canvas.multi], 'Group'); return; }
             if (k === 'z' && !e.shiftKey) { e.preventDefault(); doUndo(); return; }
             if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); doRedo(); return; }
         }
+        if (e.key === '.' && !typing && !mod) { e.preventDefault(); canvas.fitSelection(); return; }
         // Copy and cut the picked blocks or group. Text you have highlighted
         // on the page is left to the browser.
         if (mod && !typing && !e.altKey && ['c', 'x'].includes(e.key.toLowerCase()) && !String(window.getSelection?.() ?? '').trim()) {
@@ -1107,7 +1116,7 @@ function renderMultiInspector(box) {
     del.innerHTML = `<i class="fa-solid fa-trash-can"></i> Delete these ${ids.length} blocks`;
     del.addEventListener('click', () => deleteBlocks(ids));
     box.append(del);
-    box.append(el('div', 'pc-hint', 'Shift-click a block to add or remove it. Shift-drag on empty canvas to pick everything in a box.'));
+    box.append(el('div', 'pc-hint', 'Drag empty canvas to select. Shift adds, Alt removes, Ctrl-click toggles. Hold Space or use the middle button to pan. Ctrl+A selects all; Ctrl+G groups; . fits the selection.'));
 }
 
 function makeGroup(ids, title) {

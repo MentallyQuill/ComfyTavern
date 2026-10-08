@@ -16,6 +16,9 @@ import {
     groupMembers, ungroup, deleteGroup, groupOf, inOffGroup, settleOnBlankets, gatherBlanket, setGroupEnabled, blanketAt, GROUP_MIN,
 } from './state.js?v=0.17.0';
 import { selectLabel } from './select.js?v=0.17.0';
+import { graphPoint, zoomAt, wheelFactor } from './canvas/camera.js?v=0.17.0';
+import { createFrameScheduler } from './canvas/frame.js?v=0.17.0';
+import { selectionMode, rectangle, intersects, combineSelection } from './canvas/selection.js?v=0.17.0';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -130,8 +133,11 @@ export class Canvas {
         this.trace = null;          // last compile trace, keyed by node id
         this.tokens = null;         // live token counts, keyed by node id
         this.tokensKey = '';
+        this.mode = 'select';
+        this.spaceDown = false;
 
         host.classList.add('pc-canvas');
+        host.tabIndex = 0;
         host.innerHTML = '';
 
         this.viewport = document.createElement('div');
@@ -148,6 +154,8 @@ export class Canvas {
         this.viewport.append(this.svg, this.nodeLayer);
         host.append(this.viewport);
 
+        this.frames = createFrameScheduler(() => this.applyTransform());
+
         this.#bind();
     }
 
@@ -162,9 +170,11 @@ export class Canvas {
 
     setGraph(graph) {
         if (!graph) return;
+        this.cancelGesture();
         if (graph !== this.graph) { this.tokens = null; this.tokensKey = ''; }
         this.graph = graph;
         this.selection = null;
+        this.multi.clear();
         this.render();
     }
 
@@ -242,25 +252,13 @@ export class Canvas {
     /** Screen coordinates to graph coordinates. */
     toGraph(clientX, clientY) {
         const rect = this.host.getBoundingClientRect();
-        const v = this.view;
-        return {
-            x: (clientX - rect.left - v.x) / v.zoom,
-            y: (clientY - rect.top - v.y) / v.zoom,
-        };
+        return graphPoint(this.view, { x: clientX - rect.left, y: clientY - rect.top });
     }
 
     zoomBy(factor, clientX, clientY) {
-        const v = this.view;
-        const next = Math.max(0.25, Math.min(2.5, v.zoom * factor));
-        if (next === v.zoom) return;
+        if (!this.graph) return;
         const rect = this.host.getBoundingClientRect();
-        const px = clientX - rect.left;
-        const py = clientY - rect.top;
-        v.x = px - (px - v.x) * (next / v.zoom);
-        v.y = py - (py - v.y) * (next / v.zoom);
-        v.zoom = next;
-        this.applyTransform();
-        this.#drawWires();
+        if (zoomAt(this.view, factor, { x: clientX - rect.left, y: clientY - rect.top })) this.applyTransform();
     }
 
     fit() {
@@ -282,7 +280,6 @@ export class Canvas {
         v.x = -minX * zoom + (rect.width - (maxX - minX) * zoom) / 2;
         v.y = -minY * zoom + (rect.height - (maxY - minY) * zoom) / 2;
         this.applyTransform();
-        this.#drawWires();
     }
 
     /* -------------------------------------------------------------- */
@@ -599,13 +596,125 @@ export class Canvas {
         for (const el of this.nodeLayer.querySelectorAll('.pc-node[data-id]')) {
             el.classList.toggle('pc-multi', this.multi.has(el.dataset.id));
         }
+        for (const el of this.nodeLayer.querySelectorAll('.pc-node-group')) {
+            const members = groupMembers(this.graph, el.dataset.group);
+            el.classList.toggle('pc-multi', members.length > 0 && members.every(n => this.multi.has(n.id)));
+        }
     }
 
     /** Pick several blocks (Shift-click, or a Shift-drag box). */
     setMulti(ids) {
-        this.multi = new Set(ids);
+        const next = new Set(ids.filter(id => this.graph?.nodes[id]));
+        if (next.size === this.multi.size && [...next].every(id => this.multi.has(id))
+            && (!this.selection || (next.size === 1 && this.selection.kind === 'node' && next.has(this.selection.id)))) return;
+        this.multi = next;
+        this.selection = next.size === 1 ? { kind: 'node', id: [...next][0] } : null;
+        for (const el of this.nodeLayer.querySelectorAll('.pc-node[data-id]')) el.classList.toggle('pc-selected', this.selection?.id === el.dataset.id);
+        for (const el of this.nodeLayer.querySelectorAll('.pc-node-group, .pc-group-frame')) el.classList.remove('pc-selected');
         this.#paintMulti();
+        this.#applyFocus();
+        this.hooks.onSelect?.(this.selection ? this.graph.nodes[this.selection.id] : null, this.selection?.kind ?? null);
         this.hooks.onMulti?.([...this.multi]);
+    }
+
+    #pickedIds() {
+        const ids = new Set(this.multi);
+        if (this.selection?.kind === 'node') ids.add(this.selection.id);
+        if (this.selection?.kind === 'group') for (const n of groupMembers(this.graph, this.selection.id)) ids.add(n.id);
+        return ids;
+    }
+
+    #selectedGroupStarts() {
+        return Object.values(this.graph.groups ?? {}).filter(g => g.collapsed && groupMembers(this.graph, g.id).every(n => this.multi.has(n.id)))
+            .map(g => ({ id: g.id, x: g.x, y: g.y, frame: g.frame && { ...g.frame } }));
+    }
+
+    setMode(mode) {
+        this.mode = mode === 'pan' ? 'pan' : 'select';
+        this.host.classList.toggle('pc-pan-mode', this.mode === 'pan');
+        if (this.graph) this.hooks.onView?.({ ...this.view, mode: this.mode });
+    }
+
+    selectAll() { if (this.graph) this.setMulti(Object.keys(this.graph.nodes)); }
+
+    fitSelection() {
+        const ids = this.#pickedIds();
+        if (!ids.size) { this.fit(); return; }
+        const boxes = [];
+        const groups = new Set();
+        for (const id of ids) {
+            const n = this.graph.nodes[id]; if (!n) continue;
+            const g = this.#folded(n);
+            if (g) {
+                if (groups.has(g.id)) continue; groups.add(g.id);
+                const el = this.nodeLayer.querySelector(`.pc-node-group[data-group="${CSS.escape(g.id)}"]`);
+                boxes.push({ x: g.x, y: g.y, w: g.w || 260, h: el?.offsetHeight || 80 });
+            } else boxes.push({ x: n.x, y: n.y, w: n.w || 260, h: this.heightOf(n) || 90 });
+        }
+        if (!boxes.length) return;
+        const minX = Math.min(...boxes.map(b => b.x)) - 60, minY = Math.min(...boxes.map(b => b.y)) - 60;
+        const maxX = Math.max(...boxes.map(b => b.x + b.w)) + 60, maxY = Math.max(...boxes.map(b => b.y + b.h)) + 60;
+        const rect = this.host.getBoundingClientRect();
+        const zoom = Math.max(0.25, Math.min(1.2, rect.width / (maxX - minX), rect.height / (maxY - minY)));
+        Object.assign(this.view, { zoom, x: (rect.width - (minX + maxX) * zoom) / 2, y: (rect.height - (minY + maxY) * zoom) / 2 });
+        this.applyTransform();
+    }
+
+    /** Restore a gesture without persisting a half-completed graph edit. */
+    cancelGesture() {
+        const active = !!(this.drag || this.marquee || this.pan || this.linking);
+        this.frames.cancel(); clearTimeout(this.wheelTimer);
+        const d = this.drag;
+        if (d && this.graph) {
+            for (const [id, x, y] of d.starts ?? d.several ?? []) {
+                const n = this.graph.nodes[id]; if (n) { n.x = x; n.y = y; }
+            }
+            if (d.id && this.graph.nodes[d.id]) Object.assign(this.graph.nodes[d.id], { x: d.homeX, y: d.homeY });
+            for (const start of d.groups ?? []) {
+                const group = this.graph.groups?.[start.id];
+                if (group) { group.x = start.x; group.y = start.y; if (start.frame) group.frame = { ...start.frame }; }
+            }
+            const g = this.graph.groups?.[d.group ?? d.resize];
+            if (g && d.resize && g.frame) Object.assign(g.frame, { w: d.w, h: d.h });
+            else if (g) { g.x = d.gx; g.y = d.gy; if (g.frame && d.fx !== undefined) Object.assign(g.frame, { x: d.fx, y: d.fy }); }
+        }
+        if (this.pan?.start && this.graph) Object.assign(this.view, this.pan.start);
+        this.marquee?.box.remove();
+        this.drag = null; this.marquee = null; this.pan = null; this.linking = null;
+        this.spaceDown = false;
+        this.host.classList.remove('pc-panning', 'pc-interacting', 'pc-tying', 'pc-space-pan');
+        this.hooks.onNodeOverFolder?.(null); this.hooks.onDragBlock?.(false);
+        if (active && this.graph) {
+            const start = this.gestureStart;
+            this.multi = new Set(start?.multi ?? this.multi);
+            this.selection = start?.selection ?? null;
+            this.render();
+            const sel = this.selection;
+            const picked = sel?.kind === 'node' ? this.graph.nodes[sel.id] : sel?.kind === 'group' ? this.graph.groups?.[sel.id] : sel?.kind === 'wire' ? this.graph.wires[sel.id] : null;
+            this.hooks.onSelect?.(picked, sel?.kind ?? null); this.hooks.onMulti?.([...this.multi]);
+        }
+        return active;
+    }
+
+    #updateMarquee(e) {
+        const m = this.marquee;
+        if (!m) return;
+        if (!m.moved && Math.hypot(e.clientX - m.cx, e.clientY - m.cy) < 4) return;
+        m.moved = true;
+        const p = this.toGraph(e.clientX, e.clientY);
+        m.x1 = p.x; m.y1 = p.y;
+        const r = rectangle({ x: m.x0, y: m.y0 }, p);
+        Object.assign(m.box.style, { display: '', left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` });
+        const hits = [];
+        for (const n of Object.values(this.graph.nodes)) {
+            if (!this.#folded(n) && intersects(r, { x: n.x, y: n.y, w: n.w || 260, h: this.heightOf(n) || 90 })) hits.push(n.id);
+        }
+        for (const g of Object.values(this.graph.groups ?? {})) {
+            if (!g.collapsed) continue;
+            const el = this.nodeLayer.querySelector(`.pc-node-group[data-group="${CSS.escape(g.id)}"]`);
+            if (intersects(r, { x: g.x, y: g.y, w: g.w || 260, h: el?.offsetHeight || 80 })) hits.push(...groupMembers(this.graph, g.id).map(n => n.id));
+        }
+        this.setMulti([...combineSelection(m.initial, hits, m.mode)]);
     }
 
     /** Fold or unfold a group. A folded group sits where its top-left block was. */
@@ -1296,20 +1405,58 @@ export class Canvas {
     /* interaction                                                     */
     /* -------------------------------------------------------------- */
 
+    #crossedDragThreshold(e) {
+        return this.drag?.moved || Math.hypot(e.clientX - (this.gestureStart?.cx ?? e.clientX), e.clientY - (this.gestureStart?.cy ?? e.clientY)) >= 4;
+    }
+
     #bind() {
         const host = this.host;
+        const typing = (e) => e.target?.closest?.('input, textarea, select, [contenteditable="true"]') || document.activeElement?.matches?.('input, textarea, select, [contenteditable="true"]');
+        document.addEventListener('keydown', (e) => {
+            const root = host.closest('.pc-root');
+            if (root && !root.classList.contains('pc-open')) return;
+            if ((e.code === 'Space' || e.key === ' ') && !typing(e)) {
+                e.preventDefault(); this.spaceDown = true; host.classList.add('pc-space-pan');
+            }
+        });
+        document.addEventListener('keyup', (e) => {
+            if (e.code === 'Space' || e.key === ' ') { this.spaceDown = false; host.classList.remove('pc-space-pan'); }
+        });
+        window.addEventListener('blur', () => this.cancelGesture());
+        host.addEventListener('pointercancel', () => this.cancelGesture());
 
         // Where the pointer is on the canvas, so a paste lands under it.
         host.addEventListener('mousemove', (e) => { if (this.graph) this.pointer = this.toGraph(e.clientX, e.clientY); });
         host.addEventListener('mouseleave', () => { this.pointer = null; });
 
         host.addEventListener('wheel', (e) => {
+            if (!this.graph || this.drag || this.linking || this.marquee) return;
             e.preventDefault();
-            this.zoomBy(e.deltaY < 0 ? 1.1 : 1 / 1.1, e.clientX, e.clientY);
+            const rect = host.getBoundingClientRect();
+            const factor = wheelFactor(e.deltaY, e.deltaMode, rect.height);
+            if (!zoomAt(this.view, factor, { x: e.clientX - rect.left, y: e.clientY - rect.top })) return;
+            host.classList.add('pc-interacting');
+            this.frames.schedule();
+            clearTimeout(this.wheelTimer);
+            this.wheelTimer = setTimeout(() => {
+                this.frames.flush(); host.classList.remove('pc-interacting');
+                if (this.graph) touchGraph(this.graph);
+            }, 160);
         }, { passive: false });
 
         host.addEventListener('mousedown', (e) => {
             if (!this.graph) return;
+            if (typing(e)) return;
+            if (e.button === 1 || (e.button === 0 && (this.spaceDown || this.mode === 'pan'))) {
+                e.preventDefault();
+                this.gestureStart = { selection: this.selection && { ...this.selection }, multi: [...this.multi] };
+                const v = this.view;
+                this.pan = { x: e.clientX - v.x, y: e.clientY - v.y, start: { ...v } };
+                host.classList.add('pc-panning');
+                return;
+            }
+            if (e.button !== 0) return;
+            this.gestureStart = { selection: this.selection && { ...this.selection }, multi: [...this.multi], cx: e.clientX, cy: e.clientY };
             const port = e.target.closest('.pc-port');
             const nodeEl = e.target.closest('.pc-node[data-id]');
             const groupEl = e.target.closest('.pc-node-group, .pc-group-frame-head, .pc-group-resize');
@@ -1342,6 +1489,18 @@ export class Canvas {
                 if (action === 'collapse') { this.setCollapsed(gid, true); return; }
                 if (action === 'open') { this.setCollapsed(gid, false); return; }
                 if (action === 'toggle') { this.toggleGroup(gid); return; }
+                const members = groupMembers(this.graph, gid).map(n => n.id);
+                if (g.collapsed && (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey)) {
+                    const ids = this.#pickedIds();
+                    const remove = e.altKey || ((e.ctrlKey || e.metaKey) && !e.shiftKey && members.every(id => ids.has(id)));
+                    for (const id of members) remove ? ids.delete(id) : ids.add(id);
+                    this.setMulti([...ids]); return;
+                }
+                if (g.collapsed && this.multi.size > members.length && members.every(id => this.multi.has(id))) {
+                    const start = this.toGraph(e.clientX, e.clientY);
+                    this.drag = { several: [...this.multi].map(id => [id, this.graph.nodes[id].x, this.graph.nodes[id].y]), groups: this.#selectedGroupStarts(), sx: start.x, sy: start.y, moved: false };
+                    return;
+                }
                 this.multi.clear();
                 this.select({ kind: 'group', id: gid });
                 const start = this.toGraph(e.clientX, e.clientY);
@@ -1383,17 +1542,17 @@ export class Canvas {
             if (nodeEl && e.button === 0) {
                 const id = nodeEl.dataset.id;
                 const node = this.graph.nodes[id];
-                // Shift or Ctrl: add to (or take out of) a selection of several.
-                if (e.shiftKey || e.ctrlKey || e.metaKey) {
-                    if (!this.multi.size && this.selection?.kind === 'node' && this.selection.id !== id) this.multi.add(this.selection.id);
-                    if (this.multi.has(id)) this.multi.delete(id); else this.multi.add(id);
-                    this.setMulti([...this.multi]);
+                if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) {
+                    const ids = this.#pickedIds();
+                    if (e.altKey || ((e.ctrlKey || e.metaKey) && !e.shiftKey && ids.has(id))) ids.delete(id);
+                    else ids.add(id);
+                    this.setMulti([...ids]);
                     return;
                 }
                 if (this.multi.size > 1 && this.multi.has(id)) {
                     // Drag them all together.
                     const start = this.toGraph(e.clientX, e.clientY);
-                    this.drag = { several: [...this.multi].map(m => [m, this.graph.nodes[m]?.x ?? 0, this.graph.nodes[m]?.y ?? 0]), sx: start.x, sy: start.y, moved: false };
+                    this.drag = { several: [...this.multi].map(m => [m, this.graph.nodes[m]?.x ?? 0, this.graph.nodes[m]?.y ?? 0]), groups: this.#selectedGroupStarts(), clicked: id, sx: start.x, sy: start.y, moved: false };
                     return;
                 }
                 if (this.multi.size) this.setMulti([]);
@@ -1419,23 +1578,17 @@ export class Canvas {
                 return;
             }
 
-            if (e.button === 0 && e.shiftKey) {
-                // Shift-drag on empty canvas: a box that picks every block it touches.
+            if (e.button === 0) {
                 const p = this.toGraph(e.clientX, e.clientY);
                 const box = document.createElement('div');
                 box.className = 'pc-marquee';
+                box.style.display = 'none';
                 this.nodeLayer.append(box);
-                this.marquee = { x0: p.x, y0: p.y, x1: p.x, y1: p.y, box };
+                this.marquee = { x0: p.x, y0: p.y, x1: p.x, y1: p.y, cx: e.clientX, cy: e.clientY, box, mode: selectionMode(e), initial: this.#pickedIds(), moved: false };
+                e.preventDefault();
                 return;
             }
 
-            if (e.button === 0 || e.button === 1) {
-                if (this.multi.size) this.setMulti([]);
-                this.select(null);
-                const v = this.view;
-                this.pan = { x: e.clientX - v.x, y: e.clientY - v.y };
-                host.classList.add('pc-panning');
-            }
         });
 
         window.addEventListener('mousemove', (e) => {
@@ -1455,16 +1608,11 @@ export class Canvas {
                 return;
             }
             if (this.marquee) {
-                const p = this.toGraph(e.clientX, e.clientY);
-                const m = this.marquee;
-                m.x1 = p.x; m.y1 = p.y;
-                Object.assign(m.box.style, {
-                    left: `${Math.min(m.x0, m.x1)}px`, top: `${Math.min(m.y0, m.y1)}px`,
-                    width: `${Math.abs(m.x1 - m.x0)}px`, height: `${Math.abs(m.y1 - m.y0)}px`,
-                });
+                this.#updateMarquee(e);
                 return;
             }
             if (this.drag?.resize) {
+                if (!this.#crossedDragThreshold(e)) return;
                 const p = this.toGraph(e.clientX, e.clientY);
                 const d = this.drag;
                 const g = this.graph.groups?.[d.resize];
@@ -1477,6 +1625,7 @@ export class Canvas {
                 return;
             }
             if (this.drag?.group || this.drag?.several) {
+                if (!this.#crossedDragThreshold(e)) return;
                 const p = this.toGraph(e.clientX, e.clientY);
                 const d = this.drag;
                 const dx = Math.round(p.x - d.sx), dy = Math.round(p.y - d.sy);
@@ -1486,6 +1635,10 @@ export class Canvas {
                     const n = this.graph.nodes[id];
                     if (!n) continue;
                     n.x = x + dx; n.y = y + dy;
+                }
+                for (const start of d.groups ?? []) {
+                    const g = this.graph.groups?.[start.id];
+                    if (g) { g.x = start.x + dx; g.y = start.y + dy; if (g.frame && start.frame) { g.frame.x = start.frame.x + dx; g.frame.y = start.frame.y + dy; } }
                 }
                 if (d.group) {
                     const g = this.graph.groups?.[d.group];
@@ -1500,6 +1653,7 @@ export class Canvas {
                 return;
             }
             if (this.drag) {
+                if (!this.#crossedDragThreshold(e)) return;
                 const p = this.toGraph(e.clientX, e.clientY);
                 const node = this.graph.nodes[this.drag.id];
                 if (!node) return;
@@ -1528,7 +1682,7 @@ export class Canvas {
                 const v = this.view;
                 v.x = e.clientX - this.pan.x;
                 v.y = e.clientY - this.pan.y;
-                this.applyTransform();
+                this.frames.schedule();
             }
         });
 
@@ -1549,19 +1703,11 @@ export class Canvas {
                 return;
             }
             if (this.marquee) {
+                this.#updateMarquee(e);
                 const m = this.marquee;
                 this.marquee = null;
                 m.box.remove();
-                const [x0, x1] = [Math.min(m.x0, m.x1), Math.max(m.x0, m.x1)];
-                const [y0, y1] = [Math.min(m.y0, m.y1), Math.max(m.y0, m.y1)];
-                const hit = [];
-                for (const n of Object.values(this.graph.nodes)) {
-                    if (this.#folded(n)) continue;
-                    const el = this.nodeLayer.querySelector(`.pc-node[data-id="${CSS.escape(n.id)}"]`);
-                    const h = el ? el.offsetHeight : 90;
-                    if (n.x < x1 && n.x + (n.w || 260) > x0 && n.y < y1 && n.y + h > y0) hit.push(n.id);
-                }
-                this.setMulti(hit);
+                if (!m.moved && m.mode === 'replace') this.setMulti([]);
                 return;
             }
             if (this.drag?.resize) {
@@ -1588,6 +1734,7 @@ export class Canvas {
                     touchGraph(this.graph);
                     this.hooks.onChange?.();
                 }
+                else if (d.clicked) this.setMulti([d.clicked]);
                 this.render();
                 return;
             }
@@ -1613,6 +1760,7 @@ export class Canvas {
                 this.render();
             }
             if (this.pan) {
+                this.frames.flush();
                 this.pan = null;
                 this.host.classList.remove('pc-panning');
                 touchGraph(this.graph);
